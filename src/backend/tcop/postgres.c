@@ -2745,6 +2745,10 @@ start_xact_command(void)
 	{
 		StartTransactionCommand();
 
+		/* Schedule or reschedule transaction timeout */
+		if (TransactionTimeout > 0)
+			enable_timeout_after(TRANSACTION_TIMEOUT, TransactionTimeout);
+
 		xact_started = true;
 	}
 
@@ -3424,6 +3428,17 @@ ProcessInterrupts(void)
 					 errmsg("terminating connection due to idle-in-transaction timeout")));
 		else
 			IdleInTransactionSessionTimeoutPending = false;
+	}
+
+	if (TransactionTimeoutPending)
+	{
+		/* As above, ignore the signal if the GUC has been reset to zero. */
+		if (TransactionTimeout > 0)
+			ereport(FATAL,
+					(errcode(ERRCODE_TRANSACTION_TIMEOUT),
+					 errmsg("terminating connection due to transaction timeout")));
+		else
+			TransactionTimeoutPending = false;
 	}
 
 	if (IdleSessionTimeoutPending)
@@ -4491,7 +4506,8 @@ PostgresMain(const char *dbname, const char *username)
 				pgstat_report_activity(STATE_IDLEINTRANSACTION_ABORTED, NULL);
 
 				/* Start the idle-in-transaction timer */
-				if (IdleInTransactionSessionTimeout > 0)
+				if (IdleInTransactionSessionTimeout > 0
+					&& (IdleInTransactionSessionTimeout < TransactionTimeout || TransactionTimeout == 0))
 				{
 					idle_in_transaction_timeout_enabled = true;
 					enable_timeout_after(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
@@ -4504,7 +4520,8 @@ PostgresMain(const char *dbname, const char *username)
 				pgstat_report_activity(STATE_IDLEINTRANSACTION, NULL);
 
 				/* Start the idle-in-transaction timer */
-				if (IdleInTransactionSessionTimeout > 0)
+				if (IdleInTransactionSessionTimeout > 0
+					&& (IdleInTransactionSessionTimeout < TransactionTimeout || TransactionTimeout == 0))
 				{
 					idle_in_transaction_timeout_enabled = true;
 					enable_timeout_after(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
@@ -4562,6 +4579,9 @@ PostgresMain(const char *dbname, const char *username)
 					enable_timeout_after(IDLE_SESSION_TIMEOUT,
 										 IdleSessionTimeout);
 				}
+
+				if (get_timeout_active(TRANSACTION_TIMEOUT))
+					disable_timeout(TRANSACTION_TIMEOUT, false);
 			}
 
 			/* Report any recently-changed GUC options */
@@ -5120,7 +5140,8 @@ enable_statement_timeout(void)
 	/* must be within an xact */
 	Assert(xact_started);
 
-	if (StatementTimeout > 0)
+	if (StatementTimeout > 0
+		&& (StatementTimeout < TransactionTimeout || TransactionTimeout == 0))
 	{
 		if (!get_timeout_active(STATEMENT_TIMEOUT))
 			enable_timeout_after(STATEMENT_TIMEOUT, StatementTimeout);

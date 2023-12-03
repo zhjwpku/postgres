@@ -1,4 +1,4 @@
-Parsed test spec with 2 sessions
+Parsed test spec with 6 sessions
 
 starting permutation: rdtbl sto locktbl
 step rdtbl: SELECT * FROM accounts;
@@ -79,3 +79,42 @@ step slto: SET lock_timeout = '10s'; SET statement_timeout = '10ms';
 step update: DELETE FROM accounts WHERE accountid = 'checking'; <waiting ...>
 step update: <... completed>
 ERROR:  canceling statement due to statement timeout
+
+starting permutation: stt1_set stt1_begin sleep_here stt2_set stt2_begin sleep_there stt3_check_stt2 itt4_set itt4_begin sleep_there stt3_check_itt4
+step stt1_set: SET transaction_timeout = '1ms';
+step stt1_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step sleep_here: SELECT pg_sleep(1);
+FATAL:  terminating connection due to transaction timeout
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+
+step stt2_set: SET transaction_timeout = '1ms';
+step stt2_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step sleep_there: SELECT pg_sleep(0.1);
+pg_sleep
+--------
+        
+(1 row)
+
+step stt3_check_stt2: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/stt2'
+count
+-----
+    0
+(1 row)
+
+step itt4_set: SET idle_in_transaction_session_timeout = '1ms'; SET statement_timeout = '10s'; SET lock_timeout = '10s'; SET transaction_timeout = '10s';
+step itt4_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step sleep_there: SELECT pg_sleep(0.1);
+pg_sleep
+--------
+        
+(1 row)
+
+step stt3_check_itt4: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/itt4' <waiting ...>
+step stt3_check_itt4: <... completed>
+count
+-----
+    0
+(1 row)
+
