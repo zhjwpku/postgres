@@ -427,6 +427,8 @@ ProcessCopyOptions(ParseState *pstate,
 
 	opts_out->file_encoding = -1;
 
+	/* Text is the default format. */
+	opts_out->handler = CopyHandlerOpsText;
 	/* Extract options from the statement node tree */
 	foreach(option, options)
 	{
@@ -442,9 +444,15 @@ ProcessCopyOptions(ParseState *pstate,
 			if (strcmp(fmt, "text") == 0)
 				 /* default format */ ;
 			else if (strcmp(fmt, "csv") == 0)
+			{
 				opts_out->csv_mode = true;
+				opts_out->handler = CopyHandlerOpsCSV;
+			}
 			else if (strcmp(fmt, "binary") == 0)
+			{
 				opts_out->binary = true;
+				opts_out->handler = CopyHandlerOpsBinary;
+			}
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -864,3 +872,39 @@ CopyGetAttnums(TupleDesc tupDesc, Relation rel, List *attnamelist)
 
 	return attnums;
 }
+
+const CopyHandlerOps CopyHandlerOpsText = {
+	.copy_to_start = CopyToFormatTextStart,
+	.copy_to_one_row = CopyToFormatTextOneRow,
+	.copy_to_end = CopyToFormatTextEnd,
+	.copy_from_start = CopyFromFormatTextStart,
+	.copy_from_next = CopyFromFormatTextNext,
+	.copy_from_error_callback = CopyFromFormatTextErrorCallback,
+	.copy_from_end = NULL,
+};
+
+/*
+ * We can use the same CopyHandlerOps for both of "text" and "csv" because
+ * CopyToFormatText*() refer cstate->opts.csv_mode and change their
+ * behavior. We can split the implementations and stop referring
+ * cstate->opts.csv_mode later.
+ */
+const CopyHandlerOps CopyHandlerOpsCSV = {
+	.copy_to_start = CopyToFormatTextStart,
+	.copy_to_one_row = CopyToFormatTextOneRow,
+	.copy_to_end = CopyToFormatTextEnd,
+	.copy_from_start = CopyFromFormatTextStart,
+	.copy_from_next = CopyFromFormatTextNext,
+	.copy_from_error_callback = CopyFromFormatTextErrorCallback,
+	.copy_from_end = NULL,
+};
+
+const CopyHandlerOps CopyHandlerOpsBinary = {
+	.copy_to_start = CopyToFormatBinaryStart,
+	.copy_to_one_row = CopyToFormatBinaryOneRow,
+	.copy_to_end = CopyToFormatBinaryEnd,
+	.copy_from_start = CopyFromFormatBinaryStart,
+	.copy_from_next = CopyFromFormatBinaryNext,
+	.copy_from_error_callback = CopyFromFormatBinaryErrorCallback,
+	.copy_from_end = NULL,
+};

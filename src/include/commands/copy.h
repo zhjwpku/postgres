@@ -30,6 +30,34 @@ typedef enum CopyHeaderChoice
 	COPY_HEADER_MATCH,
 } CopyHeaderChoice;
 
+/* These are private in commands/copy[from|to].c */
+typedef struct CopyFromStateData *CopyFromState;
+typedef struct CopyToStateData *CopyToState;
+
+/* Routines for a COPY HANDLER implementation. */
+typedef struct CopyHandlerOps
+{
+	/* Called when COPY TO is started. This will send a header. */
+	void		(*copy_to_start) (CopyToState cstate, TupleDesc tupDesc);
+
+	/* Copy one row for COPY TO. */
+	void		(*copy_to_one_row) (CopyToState cstate, TupleTableSlot *slot);
+
+	/* Called when COPY TO is ended. This will send a trailer. */
+	void		(*copy_to_end) (CopyToState cstate);
+
+	void		(*copy_from_start) (CopyFromState cstate, TupleDesc tupDesc);
+	bool		(*copy_from_next) (CopyFromState cstate, ExprContext *econtext,
+			 					   Datum *values, bool *nulls);
+	void		(*copy_from_error_callback) (CopyFromState cstate);
+	void		(*copy_from_end) (CopyFromState cstate);
+} CopyHandlerOps;
+
+/* Predefined CopyToFormatOps for "text", "csv" and "binary". */
+extern PGDLLIMPORT const CopyHandlerOps CopyHandlerOpsText;
+extern PGDLLIMPORT const CopyHandlerOps CopyHandlerOpsCSV;
+extern PGDLLIMPORT const CopyHandlerOps CopyHandlerOpsBinary;
+
 /*
  * A struct to hold COPY options, in a parsed form. All of these are related
  * to formatting, except for 'freeze', which doesn't really belong here, but
@@ -63,11 +91,8 @@ typedef struct CopyFormatOptions
 	bool	   *force_null_flags;	/* per-column CSV FN flags */
 	bool		convert_selectively;	/* do selective binary conversion? */
 	List	   *convert_select; /* list of column names (can be NIL) */
+	CopyHandlerOps handler;		/* copy handler operations */
 } CopyFormatOptions;
-
-/* These are private in commands/copy[from|to].c */
-typedef struct CopyFromStateData *CopyFromState;
-typedef struct CopyToStateData *CopyToState;
 
 typedef int (*copy_data_source_cb) (void *outbuf, int minread, int maxread);
 typedef void (*copy_data_dest_cb) (void *data, int len);
@@ -101,5 +126,21 @@ extern void EndCopyTo(CopyToState cstate);
 extern uint64 DoCopyTo(CopyToState cstate);
 extern List *CopyGetAttnums(TupleDesc tupDesc, Relation rel,
 							List *attnamelist);
+
+extern void CopyToFormatTextStart(CopyToState cstate, TupleDesc tupDesc);
+extern void CopyToFormatTextOneRow(CopyToState cstate, TupleTableSlot *slot);
+extern void CopyToFormatTextEnd(CopyToState cstate);
+extern void CopyFromFormatTextStart(CopyFromState cstate, TupleDesc tupDesc);
+extern bool CopyFromFormatTextNext(CopyFromState cstate, ExprContext *econtext,
+								   Datum *values, bool *nulls);
+extern void CopyFromFormatTextErrorCallback(CopyFromState cstate);
+
+extern void CopyToFormatBinaryStart(CopyToState cstate, TupleDesc tupDesc);
+extern void CopyToFormatBinaryOneRow(CopyToState cstate, TupleTableSlot *slot);
+extern void CopyToFormatBinaryEnd(CopyToState cstate);
+extern void CopyFromFormatBinaryStart(CopyFromState cstate, TupleDesc tupDesc);
+extern bool CopyFromFormatBinaryNext(CopyFromState cstate, ExprContext *econtext,
+									 Datum *values, bool *nulls);
+extern void CopyFromFormatBinaryErrorCallback(CopyFromState cstate);
 
 #endif							/* COPY_H */

@@ -107,6 +107,71 @@ static char *limit_printout_length(const char *str);
 
 static void ClosePipeFromProgram(CopyFromState cstate);
 
+void
+CopyFromFormatBinaryErrorCallback(CopyFromState cstate)
+{
+	/* can't usefully display the data */
+	if (cstate->cur_attname)
+		errcontext("COPY %s, line %llu, column %s",
+					cstate->cur_relname,
+					(unsigned long long) cstate->cur_lineno,
+					cstate->cur_attname);
+	else
+		errcontext("COPY %s, line %llu",
+					cstate->cur_relname,
+					(unsigned long long) cstate->cur_lineno);
+}
+
+void
+CopyFromFormatTextErrorCallback(CopyFromState cstate)
+{
+	if (cstate->cur_attname && cstate->cur_attval)
+	{
+		/* error is relevant to a particular column */
+		char	   *attval;
+
+		attval = limit_printout_length(cstate->cur_attval);
+		errcontext("COPY %s, line %llu, column %s: \"%s\"",
+					cstate->cur_relname,
+					(unsigned long long) cstate->cur_lineno,
+					cstate->cur_attname,
+					attval);
+		pfree(attval);
+	}
+	else if (cstate->cur_attname)
+	{
+		/* error is relevant to a particular column, value is NULL */
+		errcontext("COPY %s, line %llu, column %s: null input",
+					cstate->cur_relname,
+					(unsigned long long) cstate->cur_lineno,
+					cstate->cur_attname);
+	}
+	else
+	{
+		/*
+			* Error is relevant to a particular line.
+			*
+			* If line_buf still contains the correct line, print it.
+			*/
+		if (cstate->line_buf_valid)
+		{
+			char	   *lineval;
+
+			lineval = limit_printout_length(cstate->line_buf.data);
+			errcontext("COPY %s, line %llu: \"%s\"",
+						cstate->cur_relname,
+						(unsigned long long) cstate->cur_lineno, lineval);
+			pfree(lineval);
+		}
+		else
+		{
+			errcontext("COPY %s, line %llu",
+						cstate->cur_relname,
+						(unsigned long long) cstate->cur_lineno);
+		}
+	}
+}
+
 /*
  * error context callback for COPY FROM
  *
@@ -123,67 +188,7 @@ CopyFromErrorCallback(void *arg)
 				   cstate->cur_relname);
 		return;
 	}
-	if (cstate->opts.binary)
-	{
-		/* can't usefully display the data */
-		if (cstate->cur_attname)
-			errcontext("COPY %s, line %llu, column %s",
-					   cstate->cur_relname,
-					   (unsigned long long) cstate->cur_lineno,
-					   cstate->cur_attname);
-		else
-			errcontext("COPY %s, line %llu",
-					   cstate->cur_relname,
-					   (unsigned long long) cstate->cur_lineno);
-	}
-	else
-	{
-		if (cstate->cur_attname && cstate->cur_attval)
-		{
-			/* error is relevant to a particular column */
-			char	   *attval;
-
-			attval = limit_printout_length(cstate->cur_attval);
-			errcontext("COPY %s, line %llu, column %s: \"%s\"",
-					   cstate->cur_relname,
-					   (unsigned long long) cstate->cur_lineno,
-					   cstate->cur_attname,
-					   attval);
-			pfree(attval);
-		}
-		else if (cstate->cur_attname)
-		{
-			/* error is relevant to a particular column, value is NULL */
-			errcontext("COPY %s, line %llu, column %s: null input",
-					   cstate->cur_relname,
-					   (unsigned long long) cstate->cur_lineno,
-					   cstate->cur_attname);
-		}
-		else
-		{
-			/*
-			 * Error is relevant to a particular line.
-			 *
-			 * If line_buf still contains the correct line, print it.
-			 */
-			if (cstate->line_buf_valid)
-			{
-				char	   *lineval;
-
-				lineval = limit_printout_length(cstate->line_buf.data);
-				errcontext("COPY %s, line %llu: \"%s\"",
-						   cstate->cur_relname,
-						   (unsigned long long) cstate->cur_lineno, lineval);
-				pfree(lineval);
-			}
-			else
-			{
-				errcontext("COPY %s, line %llu",
-						   cstate->cur_relname,
-						   (unsigned long long) cstate->cur_lineno);
-			}
-		}
-	}
+	cstate->opts.handler.copy_from_error_callback(cstate);
 }
 
 /*
@@ -1320,6 +1325,101 @@ CopyFrom(CopyFromState cstate)
 	return processed;
 }
 
+void
+CopyFromFormatBinaryStart(CopyFromState cstate, TupleDesc tupDesc)
+{
+	FmgrInfo   *in_functions;
+	Oid		   *typioparams;
+	Oid			in_func_oid;
+	AttrNumber	num_phys_attrs;
+
+	/*
+	 * Pick up the required catalog information for each attribute in the
+	 * relation, including the input function, the element type (to pass to
+	 * the input function), and info about defaults and constraints. (Which
+	 * input function we use depends on text/binary format choice.)
+	 */
+	num_phys_attrs = tupDesc->natts;
+	in_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
+	typioparams = (Oid *) palloc(num_phys_attrs * sizeof(Oid));
+
+	for (int attnum = 1; attnum <= num_phys_attrs; attnum++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+
+		/* We don't need info for dropped attributes */
+		if (att->attisdropped)
+			continue;
+
+		/* Fetch the input function and typioparam info */
+		getTypeBinaryInputInfo(att->atttypid,
+							   &in_func_oid, &typioparams[attnum - 1]);
+
+		fmgr_info(in_func_oid, &in_functions[attnum - 1]);
+	}
+	cstate->in_functions = in_functions;
+	cstate->typioparams = typioparams;
+}
+
+void
+CopyFromFormatTextStart(CopyFromState cstate, TupleDesc tupDesc)
+{
+	FmgrInfo   *in_functions;
+	Oid		   *typioparams;
+	Oid			in_func_oid;
+	AttrNumber	attr_count,
+				num_phys_attrs;
+
+	num_phys_attrs = tupDesc->natts;
+
+	/*
+	 * If encoding conversion is needed, we need another buffer to hold
+	 * the converted input data.  Otherwise, we can just point input_buf
+	 * to the same buffer as raw_buf.
+	 */
+	if (cstate->need_transcoding)
+	{
+		cstate->input_buf = (char *) palloc(INPUT_BUF_SIZE + 1);
+		cstate->input_buf_index = cstate->input_buf_len = 0;
+	}
+	else
+		cstate->input_buf = cstate->raw_buf;
+	cstate->input_reached_eof = false;
+
+	initStringInfo(&cstate->line_buf);
+
+	/* create workspace for CopyReadAttributes results */
+	attr_count = list_length(cstate->attnumlist);
+
+	cstate->max_fields = attr_count;
+	cstate->raw_fields = (char **) palloc(attr_count * sizeof(char *));
+
+	/*
+	 * Pick up the required catalog information for each attribute in the
+	 * relation, including the input function, the element type (to pass to
+	 * the input function), and info about defaults and constraints. (Which
+	 * input function we use depends on text/binary format choice.)
+	 */
+	in_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
+	typioparams = (Oid *) palloc(num_phys_attrs * sizeof(Oid));
+
+	for (int attnum = 1; attnum <= num_phys_attrs; attnum++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+
+		/* We don't need info for dropped attributes */
+		if (att->attisdropped)
+			continue;
+
+		/* Fetch the input function and typioparam info */
+		getTypeInputInfo(att->atttypid,
+						 &in_func_oid, &typioparams[attnum - 1]);
+		fmgr_info(in_func_oid, &in_functions[attnum - 1]);
+	}
+	cstate->in_functions = in_functions;
+	cstate->typioparams = typioparams;
+}
+
 /*
  * Setup to read tuples from a file for COPY FROM.
  *
@@ -1348,9 +1448,6 @@ BeginCopyFrom(ParseState *pstate,
 	TupleDesc	tupDesc;
 	AttrNumber	num_phys_attrs,
 				num_defaults;
-	FmgrInfo   *in_functions;
-	Oid		   *typioparams;
-	Oid			in_func_oid;
 	int		   *defmap;
 	ExprState **defexprs;
 	MemoryContext oldcontext;
@@ -1518,25 +1615,6 @@ BeginCopyFrom(ParseState *pstate,
 	cstate->raw_buf_index = cstate->raw_buf_len = 0;
 	cstate->raw_reached_eof = false;
 
-	if (!cstate->opts.binary)
-	{
-		/*
-		 * If encoding conversion is needed, we need another buffer to hold
-		 * the converted input data.  Otherwise, we can just point input_buf
-		 * to the same buffer as raw_buf.
-		 */
-		if (cstate->need_transcoding)
-		{
-			cstate->input_buf = (char *) palloc(INPUT_BUF_SIZE + 1);
-			cstate->input_buf_index = cstate->input_buf_len = 0;
-		}
-		else
-			cstate->input_buf = cstate->raw_buf;
-		cstate->input_reached_eof = false;
-
-		initStringInfo(&cstate->line_buf);
-	}
-
 	initStringInfo(&cstate->attribute_buf);
 
 	/* Assign range table and rteperminfos, we'll need them in CopyFrom. */
@@ -1546,17 +1624,10 @@ BeginCopyFrom(ParseState *pstate,
 		cstate->rteperminfos = pstate->p_rteperminfos;
 	}
 
+	cstate->opts.handler.copy_from_start(cstate, tupDesc);
+
 	num_defaults = 0;
 	volatile_defexprs = false;
-
-	/*
-	 * Pick up the required catalog information for each attribute in the
-	 * relation, including the input function, the element type (to pass to
-	 * the input function), and info about defaults and constraints. (Which
-	 * input function we use depends on text/binary format choice.)
-	 */
-	in_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
-	typioparams = (Oid *) palloc(num_phys_attrs * sizeof(Oid));
 	defmap = (int *) palloc(num_phys_attrs * sizeof(int));
 	defexprs = (ExprState **) palloc(num_phys_attrs * sizeof(ExprState *));
 
@@ -1567,15 +1638,6 @@ BeginCopyFrom(ParseState *pstate,
 		/* We don't need info for dropped attributes */
 		if (att->attisdropped)
 			continue;
-
-		/* Fetch the input function and typioparam info */
-		if (cstate->opts.binary)
-			getTypeBinaryInputInfo(att->atttypid,
-								   &in_func_oid, &typioparams[attnum - 1]);
-		else
-			getTypeInputInfo(att->atttypid,
-							 &in_func_oid, &typioparams[attnum - 1]);
-		fmgr_info(in_func_oid, &in_functions[attnum - 1]);
 
 		/* Get default info if available */
 		defexprs[attnum - 1] = NULL;
@@ -1636,8 +1698,6 @@ BeginCopyFrom(ParseState *pstate,
 	cstate->bytes_processed = 0;
 
 	/* We keep those variables in cstate. */
-	cstate->in_functions = in_functions;
-	cstate->typioparams = typioparams;
 	cstate->defmap = defmap;
 	cstate->defexprs = defexprs;
 	cstate->volatile_defexprs = volatile_defexprs;
@@ -1714,15 +1774,6 @@ BeginCopyFrom(ParseState *pstate,
 	{
 		/* Read and verify binary header */
 		ReceiveCopyBinaryHeader(cstate);
-	}
-
-	/* create workspace for CopyReadAttributes results */
-	if (!cstate->opts.binary)
-	{
-		AttrNumber	attr_count = list_length(cstate->attnumlist);
-
-		cstate->max_fields = attr_count;
-		cstate->raw_fields = (char **) palloc(attr_count * sizeof(char *));
 	}
 
 	MemoryContextSwitchTo(oldcontext);
