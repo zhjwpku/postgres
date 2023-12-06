@@ -18,10 +18,12 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "access/genam.h"
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_copy_handler.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
 #include "executor/executor.h"
@@ -36,6 +38,8 @@
 #include "rewrite/rewriteHandler.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
+#include "utils/formatting.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -427,6 +431,8 @@ ProcessCopyOptions(ParseState *pstate,
 
 	opts_out->file_encoding = -1;
 
+	/* Text is the default format. */
+	opts_out->handler = GetCopyRoutineByName(DEFAULT_COPY_HANDLER);
 	/* Extract options from the statement node tree */
 	foreach(option, options)
 	{
@@ -439,17 +445,11 @@ ProcessCopyOptions(ParseState *pstate,
 			if (format_specified)
 				errorConflictingDefElem(defel, pstate);
 			format_specified = true;
-			if (strcmp(fmt, "text") == 0)
-				 /* default format */ ;
-			else if (strcmp(fmt, "csv") == 0)
+			opts_out->handler = GetCopyRoutineByName(fmt);
+			if (strcmp(fmt, "csv") == 0)
 				opts_out->csv_mode = true;
 			else if (strcmp(fmt, "binary") == 0)
 				opts_out->binary = true;
-			else
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("COPY format \"%s\" not recognized", fmt),
-						 parser_errposition(pstate, defel->location)));
 		}
 		else if (strcmp(defel->defname, "freeze") == 0)
 		{
@@ -863,4 +863,147 @@ CopyGetAttnums(TupleDesc tupDesc, Relation rel, List *attnamelist)
 	}
 
 	return attnums;
+}
+
+static const
+CopyRoutine CopyRoutineText = {
+	.type = T_CopyRoutine,
+	.to_start = CopyToFormatTextStart,
+	.to_one_row = CopyToFormatTextOneRow,
+	.to_end = CopyToFormatTextEnd,
+	.from_start = CopyFromFormatTextStart,
+	.from_next = CopyFromFormatTextNext,
+	.from_error_callback = CopyFromFormatTextErrorCallback,
+};
+
+/*
+ * We can use the same CopyRoutine for both of "text" and "csv" because
+ * CopyToFormatText*() refer cstate->opts.csv_mode and change their
+ * behavior. We can split the implementations and stop referring
+ * cstate->opts.csv_mode later.
+ */
+static const
+CopyRoutine CopyRoutineCSV = {
+	.type = T_CopyRoutine,
+	.to_start = CopyToFormatTextStart,
+	.to_one_row = CopyToFormatTextOneRow,
+	.to_end = CopyToFormatTextEnd,
+	.from_start = CopyFromFormatTextStart,
+	.from_next = CopyFromFormatTextNext,
+	.from_error_callback = CopyFromFormatTextErrorCallback,
+};
+
+static const
+CopyRoutine CopyRoutineBinary = {
+	.type = T_CopyRoutine,
+	.to_start = CopyToFormatBinaryStart,
+	.to_one_row = CopyToFormatBinaryOneRow,
+	.to_end = CopyToFormatBinaryEnd,
+	.from_start = CopyFromFormatBinaryStart,
+	.from_next = CopyFromFormatBinaryNext,
+	.from_error_callback = CopyFromFormatBinaryErrorCallback,
+};
+
+Datum
+text_copy_handler(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_POINTER(&CopyRoutineText);
+}
+
+Datum
+csv_copy_handler(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_POINTER(&CopyRoutineCSV);
+}
+
+Datum
+binary_copy_handler(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_POINTER(&CopyRoutineBinary);
+}
+
+static NameData
+fmt_to_name(char *fmt)
+{
+	char		   *lcf; /* lower cased fmt */
+	size_t			len;
+	NameData		fmtname;
+
+	if (strlen(fmt) >= NAMEDATALEN)
+		elog(ERROR, "fmt name \"%s\" exceeds maximum name length "
+			 "of %d bytes", fmt, NAMEDATALEN - 1);
+
+	len = strlen(fmt);
+	lcf = asc_tolower(fmt, len);
+	len = strlen(lcf);
+	
+	memcpy(&(NameStr(fmtname)), lcf, len);
+	NameStr(fmtname)[len] = '\0';
+	pfree(lcf);
+
+	return fmtname;
+}
+
+CopyRoutine *
+GetCopyRoutine(Oid copyhandler)
+{
+	Datum			datum;
+	CopyRoutine	   *routine;
+
+	datum = OidFunctionCall0(copyhandler);
+	routine = (CopyRoutine *) DatumGetPointer(datum);
+
+	if (routine == NULL || !IsA(routine, CopyRoutine))
+		elog(ERROR, "copy handler function %u did not return an CopyRoutine struct",
+			 copyhandler);
+
+	return routine;
+}
+
+CopyRoutine *
+GetCopyRoutineByName(char *fmt)
+{
+	HeapTuple		tuple;
+	NameData		fmtname;
+	Relation		chrel;
+	ScanKeyData		scankey;
+	SysScanDesc		scan;
+	Form_pg_copy_handler chform;
+	regproc			copyhandler;
+
+	fmtname = fmt_to_name(fmt);
+
+	chrel = table_open(CopyHandlerRelationId, AccessShareLock);
+
+	ScanKeyInit(&scankey,
+				Anum_pg_copy_handler_chname,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				NameGetDatum(&fmtname));
+
+	scan = systable_beginscan(chrel, CopyHandlerNameIndexId, true,
+							  NULL, 1, &scankey);
+	tuple = systable_getnext(scan);
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("COPY format \"%s\" not recognized", fmt)));
+
+	chform = (Form_pg_copy_handler)GETSTRUCT(tuple);
+
+	copyhandler = chform->copyhandler;
+
+	/* Complain if handler OID is invalid */
+	if (!RegProcedureIsValid(copyhandler))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("index access method \"%s\" does not have a handler",
+						NameStr(chform->chname))));
+	}
+
+	systable_endscan(scan);
+	table_close(chrel, AccessShareLock);
+
+	/* And finally, call the handler function to get the API struct. */
+	return GetCopyRoutine(copyhandler);
 }

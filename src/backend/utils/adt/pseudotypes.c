@@ -378,3 +378,4 @@ PSEUDOTYPE_DUMMY_IO_FUNCS(anyelement);
 PSEUDOTYPE_DUMMY_IO_FUNCS(anynonarray);
 PSEUDOTYPE_DUMMY_IO_FUNCS(anycompatible);
 PSEUDOTYPE_DUMMY_IO_FUNCS(anycompatiblenonarray);
+PSEUDOTYPE_DUMMY_IO_FUNCS(copy_handler);
