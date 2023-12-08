@@ -1,0 +1,25 @@
+#----------------------------------------------------------------------
+#
+# pg_copy_handler.dat
+#    Initial contents of the pg_copy_handler system catalog.
+#
+# Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
+# Portions Copyright (c) 1994, Regents of the University of California
+#
+# src/include/catalog/pg_copy_handler.dat
+#
+#----------------------------------------------------------------------
+
+[
+
+{ oid => '4554', oid_symbol => 'TEXT_COPY_HANDLER_OID',
+  descr => 'text copy handler',
+  chname => 'text', copyhandler => 'text_copy_handler'},
+{ oid => '4555', oid_symbol => 'CSV_COPY_HANDLER_OID',
+  descr => 'csv copy handler',
+  chname => 'csv', copyhandler => 'csv_copy_handler'},
+{ oid => '4556', oid_symbol => 'BINARY_COPY_HANDLER_OID',
+  descr => 'binary copy handler',
+  chname => 'binary', copyhandler => 'binary_copy_handler'},
+
+]

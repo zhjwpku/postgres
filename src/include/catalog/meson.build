@@ -69,6 +69,7 @@ catalog_headers = [
   'pg_publication_rel.h',
   'pg_subscription.h',
   'pg_subscription_rel.h',
+  'pg_copy_handler.h',
 ]
 
 # The .dat files we need can just be listed alphabetically.
@@ -97,6 +98,7 @@ bki_data = [
   'pg_ts_parser.dat',
   'pg_ts_template.dat',
   'pg_type.dat',
+  'pg_copy_handler.dat',
 ]
 bki_data_f = files(bki_data)
 
