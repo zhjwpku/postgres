@@ -764,20 +764,22 @@ endif
 ###############################################################
 
 llvmopt = get_option('llvm')
+pgxscppopt = get_option('pgxscpp')
 llvm = not_found_dep
-if add_languages('cpp', required: llvmopt, native: false)
-  llvm = dependency('llvm', version: '>=3.9', method: 'config-tool', required: llvmopt)
+if add_languages('cpp', required: llvmopt.enabled() or pgxscppopt.enabled(), native: false)
+  cpp = meson.get_compiler('cpp')
+  if llvmopt.enabled()
+    llvm = dependency('llvm', version: '>=3.9', method: 'config-tool', required: llvmopt)
 
-  if llvm.found()
+    if llvm.found()
 
-    cdata.set('USE_LLVM', 1)
+      cdata.set('USE_LLVM', 1)
 
-    cpp = meson.get_compiler('cpp')
+      llvm_binpath = llvm.get_variable(configtool: 'bindir')
 
-    llvm_binpath = llvm.get_variable(configtool: 'bindir')
-
-    ccache = find_program('ccache', native: true, required: false)
-    clang = find_program(llvm_binpath / 'clang', required: true)
+      ccache = find_program('ccache', native: true, required: false)
+      clang = find_program(llvm_binpath / 'clang', required: true)
+    endif
   endif
 elif llvmopt.auto()
   message('llvm requires a C++ compiler')

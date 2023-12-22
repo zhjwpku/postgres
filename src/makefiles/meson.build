@@ -118,18 +118,22 @@ pgxs_kv = {
   'LIBS': var_libs,
 }
 
-if llvm.found()
+if pgxscppopt.enabled() or llvm.found()
   pgxs_kv += {
-    'CLANG': clang.path(),
     'CXX': ' '.join(cpp.cmd_array()),
-    'LLVM_BINPATH': llvm_binpath,
   }
-else
-  pgxs_kv += {
-    'CLANG': '',
-    'CXX': '',
-    'LLVM_BINPATH': '',
-  }
+
+  if llvm.found()
+    pgxs_kv += {
+      'CLANG': clang.path(),
+      'LLVM_BINPATH': llvm_binpath,
+    }
+  else
+    pgxs_kv += {
+      'CLANG': '',
+      'LLVM_BINPATH': '',
+    }
+  endif
 endif
 
 pgxs_bins = {
