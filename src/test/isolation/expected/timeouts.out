@@ -1,4 +1,4 @@
-Parsed test spec with 6 sessions
+Parsed test spec with 7 sessions
 
 starting permutation: rdtbl sto locktbl
 step rdtbl: SELECT * FROM accounts;
@@ -80,39 +80,98 @@ step update: DELETE FROM accounts WHERE accountid = 'checking'; <waiting ...>
 step update: <... completed>
 ERROR:  canceling statement due to statement timeout
 
-starting permutation: stt1_set stt1_begin sleep_here stt2_set stt2_begin sleep_there stt3_check_stt2 itt4_set itt4_begin sleep_there stt3_check_itt4
-step stt1_set: SET transaction_timeout = '1ms';
-step stt1_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
-step sleep_here: SELECT pg_sleep(1);
-FATAL:  terminating connection due to transaction timeout
-server closed the connection unexpectedly
-	This probably means the server terminated abnormally
-	before or while processing the request.
+starting permutation: stto s3_begin sleep s3_check abort
+step stto: SET statement_timeout = '1ms'; SET transaction_timeout = '1s';
+step s3_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step sleep: SELECT pg_sleep(0.1);
+ERROR:  canceling statement due to statement timeout
+step s3_check: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s3';
+count
+-----
+    1
+(1 row)
 
-step stt2_set: SET transaction_timeout = '1ms';
-step stt2_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
-step sleep_there: SELECT pg_sleep(0.1);
+step abort: ABORT;
+
+starting permutation: tsto s3_begin wait_check s3_check
+step tsto: SET statement_timeout = '1s'; SET transaction_timeout = '1ms';
+step s3_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step wait_check: SELECT pg_sleep(0.1);
 pg_sleep
 --------
         
 (1 row)
 
-step stt3_check_stt2: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/stt2'
+step s3_check: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s3';
 count
 -----
     0
 (1 row)
 
-step itt4_set: SET idle_in_transaction_session_timeout = '1ms'; SET statement_timeout = '10s'; SET lock_timeout = '10s'; SET transaction_timeout = '10s';
-step itt4_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
-step sleep_there: SELECT pg_sleep(0.1);
+
+starting permutation: itto s4_begin wait_check s4_check
+step itto: SET idle_in_transaction_session_timeout = '1ms'; SET transaction_timeout = '1s';
+step s4_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step wait_check: SELECT pg_sleep(0.1);
 pg_sleep
 --------
         
 (1 row)
 
-step stt3_check_itt4: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/itt4' <waiting ...>
-step stt3_check_itt4: <... completed>
+step s4_check: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s4';
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: tito s5_begin wait_check s5_check
+step tito: SET idle_in_transaction_session_timeout = '1s'; SET transaction_timeout = '1ms';
+step s5_begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step wait_check: SELECT pg_sleep(0.1);
+pg_sleep
+--------
+        
+(1 row)
+
+step s5_check: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s5';
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: s7_begin s7_sleep s7_commit_and_chain s7_sleep s7_select_1 wait_check s7_check
+step s7_begin: 
+    BEGIN ISOLATION LEVEL READ COMMITTED;
+    SET transaction_timeout = '150ms';
+
+step s7_sleep: SELECT pg_sleep(0.1);
+pg_sleep
+--------
+        
+(1 row)
+
+step s7_commit_and_chain: COMMIT AND CHAIN;
+step s7_sleep: SELECT pg_sleep(0.1);
+pg_sleep
+--------
+        
+(1 row)
+
+step s7_select_1: SELECT 1;
+?column?
+--------
+       1
+(1 row)
+
+step wait_check: SELECT pg_sleep(0.1);
+pg_sleep
+--------
+        
+(1 row)
+
+step s7_check: SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s7';
 count
 -----
     0

@@ -18,7 +18,7 @@ step wrtbl	{ UPDATE accounts SET balance = balance + 100; }
 teardown	{ ABORT; }
 
 session s2
-setup		{ SET transaction_timeout = '10s'; SET idle_in_transaction_session_timeout = '10s'; BEGIN ISOLATION LEVEL READ COMMITTED; }
+setup		{ BEGIN ISOLATION LEVEL READ COMMITTED; }
 step sto	{ SET statement_timeout = '10ms'; }
 step lto	{ SET lock_timeout = '10ms'; }
 step lsto	{ SET lock_timeout = '10ms'; SET statement_timeout = '10s'; }
@@ -27,28 +27,38 @@ step locktbl	{ LOCK TABLE accounts; }
 step update	{ DELETE FROM accounts WHERE accountid = 'checking'; }
 teardown	{ ABORT; }
 
-session stt1
-# enable statement_timeout to check interaction
-setup			{ SET statement_timeout = '10s'; SET lock_timeout = '10s'; }
-step stt1_set	{ SET transaction_timeout = '1ms'; }
-step stt1_begin	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
-step sleep_here	{ SELECT pg_sleep(1); }
+session s3
+step s3_begin	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
+step stto	{ SET statement_timeout = '1ms'; SET transaction_timeout = '1s'; }
+step tsto	{ SET statement_timeout = '1s'; SET transaction_timeout = '1ms'; }
+step sleep	{ SELECT pg_sleep(0.1); }
+step abort	{ ABORT; }
 
-session stt2
-setup			{ SET statement_timeout = '10s'; SET lock_timeout = '10s'; }
-step stt2_set	{ SET transaction_timeout = '1ms'; }
-step stt2_begin	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
-# Session stt2 is terminated in the background. However, isolation tester needs a step to observe it.
+session s4
+step s4_begin	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
+step itto	{ SET idle_in_transaction_session_timeout = '1ms'; SET transaction_timeout = '1s'; }
 
-session stt3
-step sleep_there{ SELECT pg_sleep(0.1); }
-# Observe that stt2\itt4 died
-step stt3_check_stt2 { SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/stt2' }
-step stt3_check_itt4 { SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/itt4' }
+session s5
+step s5_begin	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
+step tito	{ SET idle_in_transaction_session_timeout = '1s'; SET transaction_timeout = '1ms'; }
 
-session itt4
-step itt4_set	{ SET idle_in_transaction_session_timeout = '1ms'; SET statement_timeout = '10s'; SET lock_timeout = '10s'; SET transaction_timeout = '10s'; }
-step itt4_begin	{ BEGIN ISOLATION LEVEL READ COMMITTED; }
+session s6
+step wait_check	{ SELECT pg_sleep(0.1); }
+step s3_check	{ SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s3'; }
+step s4_check	{ SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s4'; }
+step s5_check	{ SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s5'; }
+step s7_check	{ SELECT count(*) FROM pg_stat_activity WHERE application_name = 'isolation/timeouts/s7'; }
+
+session s7
+step s7_begin
+{
+    BEGIN ISOLATION LEVEL READ COMMITTED;
+    SET transaction_timeout = '150ms';
+}
+step s7_commit_and_chain { COMMIT AND CHAIN; }
+# to test that quick query does not restart transaction_timeout
+step s7_select_1 { SELECT 1; }
+step s7_sleep	{ SELECT pg_sleep(0.1); }
 
 # It's possible that the isolation tester will not observe the final
 # steps as "waiting", thanks to the relatively short timeouts we use.
@@ -71,6 +81,14 @@ permutation wrtbl lsto update(*)
 # statement timeout expires first, row-level lock
 permutation wrtbl slto update(*)
 
-# timeout of active query, idle transaction timeout
-permutation stt1_set stt1_begin sleep_here stt2_set stt2_begin sleep_there stt3_check_stt2 itt4_set itt4_begin sleep_there stt3_check_itt4(*)
-# can't run tests after this, sessions stt1, stt2, and itt4 are expected to FATAL-out
+# statement timeout expires first
+permutation stto s3_begin sleep s3_check abort
+# transaction timeout expires first, session s3 FATAL-out
+permutation tsto s3_begin wait_check s3_check
+# idle in transaction timeout expires first, session s4 FATAL-out
+permutation itto s4_begin wait_check s4_check
+# transaction timeout expires first, session s5 FATAL-out
+permutation tito s5_begin wait_check s5_check
+# transaction timeout expires in presence of query flow
+# session s7 FATAL-out sleeping in last wait_check only
+permutation s7_begin s7_sleep s7_commit_and_chain s7_sleep s7_select_1 wait_check s7_check
