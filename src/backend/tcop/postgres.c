@@ -2745,10 +2745,6 @@ start_xact_command(void)
 	{
 		StartTransactionCommand();
 
-		/* Schedule or reschedule transaction timeout */
-		if (TransactionTimeout > 0)
-			enable_timeout_after(TRANSACTION_TIMEOUT, TransactionTimeout);
-
 		xact_started = true;
 	}
 
