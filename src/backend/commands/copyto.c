@@ -69,7 +69,6 @@ static void SendCopyEnd(CopyToState cstate);
 static void CopySendData(CopyToState cstate, const void *databuf, int datasize);
 static void CopySendString(CopyToState cstate, const char *str);
 static void CopySendChar(CopyToState cstate, char c);
-static void CopySendEndOfRow(CopyToState cstate);
 static void CopySendInt32(CopyToState cstate, int32 val);
 static void CopySendInt16(CopyToState cstate, int16 val);
 
@@ -117,7 +116,7 @@ CopyToTextSendEndOfRow(CopyToState cstate)
 		default:
 			break;
 	}
-	CopySendEndOfRow(cstate);
+	CopyToStateFlush(cstate);
 }
 
 static void
@@ -302,7 +301,7 @@ CopyToBinaryOneRow(CopyToState cstate, TupleTableSlot *slot)
 		}
 	}
 
-	CopySendEndOfRow(cstate);
+	CopyToStateFlush(cstate);
 }
 
 static void
@@ -311,7 +310,7 @@ CopyToBinaryEnd(CopyToState cstate)
 	/* Generate trailer for a binary copy */
 	CopySendInt16(cstate, -1);
 	/* Need to flush out the trailer */
-	CopySendEndOfRow(cstate);
+	CopyToStateFlush(cstate);
 }
 
 CopyToRoutine CopyToRoutineText = {
@@ -377,8 +376,8 @@ SendCopyEnd(CopyToState cstate)
  * CopySendData sends output data to the destination (file or frontend)
  * CopySendString does the same for null-terminated strings
  * CopySendChar does the same for single characters
- * CopySendEndOfRow does the appropriate thing at end of each data row
- *	(data is not actually flushed except by CopySendEndOfRow)
+ * CopyToStateFlush flushes the buffered data
+ *	(data is not actually flushed except by CopyToStateFlush)
  *
  * NB: no data conversion is applied by these functions
  *----------
@@ -401,8 +400,8 @@ CopySendChar(CopyToState cstate, char c)
 	appendStringInfoCharMacro(cstate->fe_msgbuf, c);
 }
 
-static void
-CopySendEndOfRow(CopyToState cstate)
+void
+CopyToStateFlush(CopyToState cstate)
 {
 	StringInfo	fe_msgbuf = cstate->fe_msgbuf;
 
