@@ -32,6 +32,7 @@
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
 #include "parser/parse_expr.h"
+#include "parser/parse_func.h"
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
 #include "utils/acl.h"
@@ -431,6 +432,69 @@ defGetCopyOnErrorChoice(DefElem *def, ParseState *pstate, bool is_from)
 }
 
 /*
+ * Process the "format" option.
+ *
+ * This function checks whether the option value is a built-in format such as
+ * "text" and "csv" or not. If the option value isn't a built-in format, this
+ * function finds a COPY format handler that returns a CopyToRoutine. If no
+ * COPY format handler is found, this function reports an error.
+ */
+static void
+ProcessCopyOptionCustomFormat(ParseState *pstate,
+							  CopyFormatOptions *opts_out,
+							  bool is_from,
+							  DefElem *defel)
+{
+	char	   *format;
+	Oid			funcargtypes[1];
+	Oid			handlerOid = InvalidOid;
+	Datum		datum;
+	void	   *routine;
+
+	format = defGetString(defel);
+
+	/* built-in formats */
+	if (strcmp(format, "text") == 0)
+		 /* default format */ return;
+	else if (strcmp(format, "csv") == 0)
+	{
+		opts_out->csv_mode = true;
+		opts_out->to_routine = &CopyToRoutineCSV;
+		return;
+	}
+	else if (strcmp(format, "binary") == 0)
+	{
+		opts_out->binary = true;
+		opts_out->to_routine = &CopyToRoutineBinary;
+		return;
+	}
+
+	/* custom format */
+	if (!is_from)
+	{
+		funcargtypes[0] = INTERNALOID;
+		handlerOid = LookupFuncName(list_make1(makeString(format)), 1,
+									funcargtypes, true);
+	}
+	if (!OidIsValid(handlerOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("COPY format \"%s\" not recognized", format),
+				 parser_errposition(pstate, defel->location)));
+
+	datum = OidFunctionCall1(handlerOid, BoolGetDatum(is_from));
+	routine = DatumGetPointer(datum);
+	if (routine == NULL || !IsA(routine, CopyToRoutine))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("COPY handler function %s(%u) did not return a CopyToRoutine struct",
+						format, handlerOid),
+				 parser_errposition(pstate, defel->location)));
+
+	opts_out->to_routine = routine;
+}
+
+/*
  * Process the statement option list for COPY.
  *
  * Scan the options list (a list of DefElem) and transpose the information
@@ -481,28 +545,10 @@ ProcessCopyOptions(ParseState *pstate,
 
 		if (strcmp(defel->defname, "format") == 0)
 		{
-			char	   *fmt = defGetString(defel);
-
 			if (format_specified)
 				errorConflictingDefElem(defel, pstate);
 			format_specified = true;
-			if (strcmp(fmt, "text") == 0)
-				 /* default format */ ;
-			else if (strcmp(fmt, "csv") == 0)
-			{
-				opts_out->csv_mode = true;
-				opts_out->to_routine = &CopyToRoutineCSV;
-			}
-			else if (strcmp(fmt, "binary") == 0)
-			{
-				opts_out->binary = true;
-				opts_out->to_routine = &CopyToRoutineBinary;
-			}
-			else
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("COPY format \"%s\" not recognized", fmt),
-						 parser_errposition(pstate, defel->location)));
+			ProcessCopyOptionCustomFormat(pstate, opts_out, is_from, defel);
 		}
 	}
 	/* Extract options except "format" from the statement node tree */

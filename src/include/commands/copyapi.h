@@ -29,6 +29,8 @@ typedef void (*CopyToEnd_function) (CopyToState cstate);
 /* Routines for a COPY TO format implementation. */
 typedef struct CopyToRoutine
 {
+	NodeTag		type;
+
 	/*
 	 * Called for processing one COPY TO option. This will return false when
 	 * the given option is invalid.
