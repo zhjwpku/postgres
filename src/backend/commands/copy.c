@@ -459,12 +459,14 @@ ProcessCopyOptionCustomFormat(ParseState *pstate,
 	else if (strcmp(format, "csv") == 0)
 	{
 		opts_out->csv_mode = true;
+		opts_out->from_routine = &CopyFromRoutineCSV;
 		opts_out->to_routine = &CopyToRoutineCSV;
 		return;
 	}
 	else if (strcmp(format, "binary") == 0)
 	{
 		opts_out->binary = true;
+		opts_out->from_routine = &CopyFromRoutineBinary;
 		opts_out->to_routine = &CopyToRoutineBinary;
 		return;
 	}
@@ -533,6 +535,7 @@ ProcessCopyOptions(ParseState *pstate,
 	opts_out->file_encoding = -1;
 
 	/* Text is the default format. */
+	opts_out->from_routine = &CopyFromRoutineText;
 	opts_out->to_routine = &CopyToRoutineText;
 
 	/*

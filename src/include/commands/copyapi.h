@@ -18,6 +18,49 @@
 #include "executor/tuptable.h"
 #include "nodes/parsenodes.h"
 
+/* This is private in commands/copyfrom.c */
+typedef struct CopyFromStateData *CopyFromState;
+
+typedef bool (*CopyFromProcessOption_function) (CopyFromState cstate, DefElem *defel);
+typedef int16 (*CopyFromGetFormat_function) (CopyFromState cstate);
+typedef void (*CopyFromStart_function) (CopyFromState cstate, TupleDesc tupDesc);
+typedef bool (*CopyFromOneRow_function) (CopyFromState cstate, ExprContext *econtext, Datum *values, bool *nulls);
+typedef void (*CopyFromEnd_function) (CopyFromState cstate);
+
+/* Routines for a COPY FROM format implementation. */
+typedef struct CopyFromRoutine
+{
+	/*
+	 * Called for processing one COPY FROM option. This will return false when
+	 * the given option is invalid.
+	 */
+	CopyFromProcessOption_function CopyFromProcessOption;
+
+	/*
+	 * Called when COPY FROM is started. This will return a format as int16
+	 * value. It's used for the CopyInResponse message.
+	 */
+	CopyFromGetFormat_function CopyFromGetFormat;
+
+	/*
+	 * Called when COPY FROM is started. This will initialize something and
+	 * receive a header.
+	 */
+	CopyFromStart_function CopyFromStart;
+
+	/* Copy one row. It returns false if no more tuples. */
+	CopyFromOneRow_function CopyFromOneRow;
+
+	/* Called when COPY FROM is ended. This will finalize something. */
+	CopyFromEnd_function CopyFromEnd;
+}			CopyFromRoutine;
+
+/* Built-in CopyFromRoutine for "text", "csv" and "binary". */
+extern CopyFromRoutine CopyFromRoutineText;
+extern CopyFromRoutine CopyFromRoutineCSV;
+extern CopyFromRoutine CopyFromRoutineBinary;
+
+
 typedef struct CopyToStateData *CopyToState;
 
 typedef bool (*CopyToProcessOption_function) (CopyToState cstate, DefElem *defel);
@@ -113,6 +156,7 @@ typedef struct CopyFormatOptions
 	bool		convert_selectively;	/* do selective binary conversion? */
 	CopyOnErrorChoice on_error; /* what to do when error happened */
 	List	   *convert_select; /* list of column names (can be NIL) */
+	CopyFromRoutine *from_routine;	/* callback routines for COPY FROM */
 	CopyToRoutine *to_routine;	/* callback routines for COPY TO */
 } CopyFormatOptions;
 
