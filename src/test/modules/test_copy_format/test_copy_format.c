@@ -19,6 +19,50 @@
 PG_MODULE_MAGIC;
 
 static bool
+CopyFromProcessOption(CopyFromState cstate, DefElem *defel)
+{
+	ereport(NOTICE,
+			(errmsg("CopyFromProcessOption: \"%s\"=\"%s\"",
+					defel->defname, defGetString(defel))));
+	return true;
+}
+
+static int16
+CopyFromGetFormat(CopyFromState cstate)
+{
+	ereport(NOTICE, (errmsg("CopyFromGetFormat")));
+	return 0;
+}
+
+static void
+CopyFromStart(CopyFromState cstate, TupleDesc tupDesc)
+{
+	ereport(NOTICE, (errmsg("CopyFromStart: natts=%d", tupDesc->natts)));
+}
+
+static bool
+CopyFromOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values, bool *nulls)
+{
+	ereport(NOTICE, (errmsg("CopyFromOneRow")));
+	return false;
+}
+
+static void
+CopyFromEnd(CopyFromState cstate)
+{
+	ereport(NOTICE, (errmsg("CopyFromEnd")));
+}
+
+static const CopyFromRoutine CopyFromRoutineTestCopyFormat = {
+	.type = T_CopyFromRoutine,
+	.CopyFromProcessOption = CopyFromProcessOption,
+	.CopyFromGetFormat = CopyFromGetFormat,
+	.CopyFromStart = CopyFromStart,
+	.CopyFromOneRow = CopyFromOneRow,
+	.CopyFromEnd = CopyFromEnd,
+};
+
+static bool
 CopyToProcessOption(CopyToState cstate, DefElem *defel)
 {
 	ereport(NOTICE,
@@ -71,7 +115,7 @@ test_copy_format(PG_FUNCTION_ARGS)
 			(errmsg("test_copy_format: is_from=%s", is_from ? "true" : "false")));
 
 	if (is_from)
-		elog(ERROR, "COPY FROM isn't supported yet");
-
-	PG_RETURN_POINTER(&CopyToRoutineTestCopyFormat);
+		PG_RETURN_POINTER(&CopyFromRoutineTestCopyFormat);
+	else
+		PG_RETURN_POINTER(&CopyToRoutineTestCopyFormat);
 }

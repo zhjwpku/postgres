@@ -30,6 +30,8 @@ typedef void (*CopyFromEnd_function) (CopyFromState cstate);
 /* Routines for a COPY FROM format implementation. */
 typedef struct CopyFromRoutine
 {
+	NodeTag		type;
+
 	/*
 	 * Called for processing one COPY FROM option. This will return false when
 	 * the given option is invalid.

@@ -472,12 +472,9 @@ ProcessCopyOptionCustomFormat(ParseState *pstate,
 	}
 
 	/* custom format */
-	if (!is_from)
-	{
-		funcargtypes[0] = INTERNALOID;
-		handlerOid = LookupFuncName(list_make1(makeString(format)), 1,
-									funcargtypes, true);
-	}
+	funcargtypes[0] = INTERNALOID;
+	handlerOid = LookupFuncName(list_make1(makeString(format)), 1,
+								funcargtypes, true);
 	if (!OidIsValid(handlerOid))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -486,14 +483,36 @@ ProcessCopyOptionCustomFormat(ParseState *pstate,
 
 	datum = OidFunctionCall1(handlerOid, BoolGetDatum(is_from));
 	routine = DatumGetPointer(datum);
-	if (routine == NULL || !IsA(routine, CopyToRoutine))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("COPY handler function %s(%u) did not return a CopyToRoutine struct",
-						format, handlerOid),
-				 parser_errposition(pstate, defel->location)));
-
-	opts_out->to_routine = routine;
+	if (is_from)
+	{
+		if (routine == NULL || !IsA(routine, CopyFromRoutine))
+			ereport(
+					ERROR,
+					(errcode(
+							 ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("COPY handler function "
+							"%s(%u) did not return a "
+							"CopyFromRoutine struct",
+							format, handlerOid),
+					 parser_errposition(
+										pstate, defel->location)));
+		opts_out->from_routine = routine;
+	}
+	else
+	{
+		if (routine == NULL || !IsA(routine, CopyToRoutine))
+			ereport(
+					ERROR,
+					(errcode(
+							 ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("COPY handler function "
+							"%s(%u) did not return a "
+							"CopyToRoutine struct",
+							format, handlerOid),
+					 parser_errposition(
+										pstate, defel->location)));
+		opts_out->to_routine = routine;
+	}
 }
 
 /*
@@ -692,7 +711,11 @@ ProcessCopyOptions(ParseState *pstate,
 		{
 			bool		processed = false;
 
-			if (!is_from)
+			if (is_from)
+				processed =
+					opts_out->from_routine->CopyFromProcessOption(
+																  cstate, defel);
+			else
 				processed = opts_out->to_routine->CopyToProcessOption(cstate, defel);
 			if (!processed)
 				ereport(ERROR,
