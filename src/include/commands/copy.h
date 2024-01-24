@@ -20,8 +20,6 @@
 #include "parser/parse_node.h"
 #include "tcop/dest.h"
 
-typedef int (*copy_data_source_cb) (void *outbuf, int minread, int maxread);
-
 extern void DoCopy(ParseState *pstate, const CopyStmt *stmt,
 				   int stmt_location, int stmt_len,
 				   uint64 *processed);
