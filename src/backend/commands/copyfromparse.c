@@ -165,7 +165,6 @@ static int	CopyGetData(CopyFromState cstate, void *databuf,
 static inline bool CopyGetInt32(CopyFromState cstate, int32 *val);
 static inline bool CopyGetInt16(CopyFromState cstate, int16 *val);
 static void CopyLoadInputBuf(CopyFromState cstate);
-static int	CopyReadBinaryData(CopyFromState cstate, char *dest, int nbytes);
 
 void
 ReceiveCopyBegin(CopyFromState cstate)
@@ -194,7 +193,7 @@ ReceiveCopyBinaryHeader(CopyFromState cstate)
 	int32		tmp;
 
 	/* Signature */
-	if (CopyReadBinaryData(cstate, readSig, 11) != 11 ||
+	if (CopyFromStateRead(cstate, readSig, 11) != 11 ||
 		memcmp(readSig, BinarySignature, 11) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
@@ -222,7 +221,7 @@ ReceiveCopyBinaryHeader(CopyFromState cstate)
 	/* Skip extension header, if present */
 	while (tmp-- > 0)
 	{
-		if (CopyReadBinaryData(cstate, readSig, 1) != 1)
+		if (CopyFromStateRead(cstate, readSig, 1) != 1)
 			ereport(ERROR,
 					(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
 					 errmsg("invalid COPY file header (wrong length)")));
@@ -364,7 +363,7 @@ CopyGetInt32(CopyFromState cstate, int32 *val)
 {
 	uint32		buf;
 
-	if (CopyReadBinaryData(cstate, (char *) &buf, sizeof(buf)) != sizeof(buf))
+	if (CopyFromStateRead(cstate, (char *) &buf, sizeof(buf)) != sizeof(buf))
 	{
 		*val = 0;				/* suppress compiler warning */
 		return false;
@@ -381,7 +380,7 @@ CopyGetInt16(CopyFromState cstate, int16 *val)
 {
 	uint16		buf;
 
-	if (CopyReadBinaryData(cstate, (char *) &buf, sizeof(buf)) != sizeof(buf))
+	if (CopyFromStateRead(cstate, (char *) &buf, sizeof(buf)) != sizeof(buf))
 	{
 		*val = 0;				/* suppress compiler warning */
 		return false;
@@ -692,14 +691,14 @@ CopyLoadInputBuf(CopyFromState cstate)
 }
 
 /*
- * CopyReadBinaryData
+ * CopyFromStateRead
  *
  * Reads up to 'nbytes' bytes from cstate->copy_file via cstate->raw_buf
  * and writes them to 'dest'.  Returns the number of bytes read (which
  * would be less than 'nbytes' only if we reach EOF).
  */
-static int
-CopyReadBinaryData(CopyFromState cstate, char *dest, int nbytes)
+int
+CopyFromStateRead(CopyFromState cstate, char *dest, int nbytes)
 {
 	int			copied_bytes = 0;
 
@@ -988,7 +987,7 @@ CopyFromBinaryOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values,
 		 */
 		char		dummy;
 
-		if (CopyReadBinaryData(cstate, &dummy, 1) > 0)
+		if (CopyFromStateRead(cstate, &dummy, 1) > 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
 					 errmsg("received copy data after EOF marker")));
@@ -1997,8 +1996,8 @@ CopyReadBinaryAttribute(CopyFromState cstate, FmgrInfo *flinfo,
 	resetStringInfo(&cstate->attribute_buf);
 
 	enlargeStringInfo(&cstate->attribute_buf, fld_size);
-	if (CopyReadBinaryData(cstate, cstate->attribute_buf.data,
-						   fld_size) != fld_size)
+	if (CopyFromStateRead(cstate, cstate->attribute_buf.data,
+						  fld_size) != fld_size)
 		ereport(ERROR,
 				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
 				 errmsg("unexpected EOF in COPY data")));
