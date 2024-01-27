@@ -71,11 +71,10 @@ CopyToProcessOption(CopyToState cstate, DefElem *defel)
 	return true;
 }
 
-static int16
-CopyToGetFormat(CopyToState cstate)
+static void
+CopyToSendCopyBegin(CopyToState cstate)
 {
 	ereport(NOTICE, (errmsg("CopyToGetFormat")));
-	return 0;
 }
 
 static void
@@ -99,7 +98,7 @@ CopyToEnd(CopyToState cstate)
 static const CopyToRoutine CopyToRoutineTestCopyFormat = {
 	.type = T_CopyToRoutine,
 	.CopyToProcessOption = CopyToProcessOption,
-	.CopyToGetFormat = CopyToGetFormat,
+	.CopyToSendCopyBegin = CopyToSendCopyBegin,
 	.CopyToStart = CopyToStart,
 	.CopyToOneRow = CopyToOneRow,
 	.CopyToEnd = CopyToEnd,

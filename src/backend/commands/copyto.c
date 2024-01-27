@@ -66,11 +66,6 @@ static void CopyAttributeOutCSV(CopyToState cstate, const char *string,
 /* Low-level communications functions */
 static void SendCopyBegin(CopyToState cstate);
 static void SendCopyEnd(CopyToState cstate);
-static void CopySendData(CopyToState cstate, const void *databuf, int datasize);
-static void CopySendString(CopyToState cstate, const char *str);
-static void CopySendChar(CopyToState cstate, char c);
-static void CopySendInt32(CopyToState cstate, int32 val);
-static void CopySendInt16(CopyToState cstate, int16 val);
 
 /*
  * CopyToRoutine implementations.
@@ -90,10 +85,20 @@ CopyToTextProcessOption(CopyToState cstate, DefElem *defel)
 	return false;
 }
 
-static int16
-CopyToTextGetFormat(CopyToState cstate)
+static void
+CopyToTextSendCopyBegin(CopyToState cstate)
 {
-	return 0;
+	StringInfoData buf;
+	int			natts = list_length(cstate->attnumlist);
+	int16		format = 0;
+	int			i;
+
+	pq_beginmessage(&buf, PqMsg_CopyOutResponse);
+	pq_sendbyte(&buf, format);	/* overall format */
+	pq_sendint16(&buf, natts);
+	for (i = 0; i < natts; i++)
+		pq_sendint16(&buf, format); /* per-column formats */
+	pq_endmessage(&buf);
 }
 
 static void
@@ -230,10 +235,20 @@ CopyToBinaryProcessOption(CopyToState cstate, DefElem *defel)
 	return false;
 }
 
-static int16
-CopyToBinaryGetFormat(CopyToState cstate)
+static void
+CopyToBinarySendCopyBegin(CopyToState cstate)
 {
-	return 1;
+	StringInfoData buf;
+	int			natts = list_length(cstate->attnumlist);
+	int16		format = 1;
+	int			i;
+
+	pq_beginmessage(&buf, PqMsg_CopyOutResponse);
+	pq_sendbyte(&buf, format);	/* overall format */
+	pq_sendint16(&buf, natts);
+	for (i = 0; i < natts; i++)
+		pq_sendint16(&buf, format); /* per-column formats */
+	pq_endmessage(&buf);
 }
 
 static void
@@ -315,7 +330,7 @@ CopyToBinaryEnd(CopyToState cstate)
 
 CopyToRoutine CopyToRoutineText = {
 	.CopyToProcessOption = CopyToTextProcessOption,
-	.CopyToGetFormat = CopyToTextGetFormat,
+	.CopyToSendCopyBegin = CopyToTextSendCopyBegin,
 	.CopyToStart = CopyToTextStart,
 	.CopyToOneRow = CopyToTextOneRow,
 	.CopyToEnd = CopyToTextEnd,
@@ -328,7 +343,7 @@ CopyToRoutine CopyToRoutineText = {
  */
 CopyToRoutine CopyToRoutineCSV = {
 	.CopyToProcessOption = CopyToTextProcessOption,
-	.CopyToGetFormat = CopyToTextGetFormat,
+	.CopyToSendCopyBegin = CopyToTextSendCopyBegin,
 	.CopyToStart = CopyToTextStart,
 	.CopyToOneRow = CopyToTextOneRow,
 	.CopyToEnd = CopyToTextEnd,
@@ -336,7 +351,7 @@ CopyToRoutine CopyToRoutineCSV = {
 
 CopyToRoutine CopyToRoutineBinary = {
 	.CopyToProcessOption = CopyToBinaryProcessOption,
-	.CopyToGetFormat = CopyToBinaryGetFormat,
+	.CopyToSendCopyBegin = CopyToBinarySendCopyBegin,
 	.CopyToStart = CopyToBinaryStart,
 	.CopyToOneRow = CopyToBinaryOneRow,
 	.CopyToEnd = CopyToBinaryEnd,
@@ -349,17 +364,7 @@ CopyToRoutine CopyToRoutineBinary = {
 static void
 SendCopyBegin(CopyToState cstate)
 {
-	StringInfoData buf;
-	int			natts = list_length(cstate->attnumlist);
-	int16		format = cstate->opts.to_routine->CopyToGetFormat(cstate);
-	int			i;
-
-	pq_beginmessage(&buf, PqMsg_CopyOutResponse);
-	pq_sendbyte(&buf, format);	/* overall format */
-	pq_sendint16(&buf, natts);
-	for (i = 0; i < natts; i++)
-		pq_sendint16(&buf, format); /* per-column formats */
-	pq_endmessage(&buf);
+	cstate->opts.to_routine->CopyToSendCopyBegin(cstate);
 	cstate->copy_dest = COPY_DEST_FRONTEND;
 }
 
@@ -382,19 +387,19 @@ SendCopyEnd(CopyToState cstate)
  * NB: no data conversion is applied by these functions
  *----------
  */
-static void
+void
 CopySendData(CopyToState cstate, const void *databuf, int datasize)
 {
 	appendBinaryStringInfo(cstate->fe_msgbuf, databuf, datasize);
 }
 
-static void
+void
 CopySendString(CopyToState cstate, const char *str)
 {
 	appendBinaryStringInfo(cstate->fe_msgbuf, str, strlen(str));
 }
 
-static void
+void
 CopySendChar(CopyToState cstate, char c)
 {
 	appendStringInfoCharMacro(cstate->fe_msgbuf, c);
@@ -464,7 +469,7 @@ CopyToStateFlush(CopyToState cstate)
 /*
  * CopySendInt32 sends an int32 in network byte order
  */
-static inline void
+inline void
 CopySendInt32(CopyToState cstate, int32 val)
 {
 	uint32		buf;
@@ -476,7 +481,7 @@ CopySendInt32(CopyToState cstate, int32 val)
 /*
  * CopySendInt16 sends an int16 in network byte order
  */
-static inline void
+inline void
 CopySendInt16(CopyToState cstate, int16 val)
 {
 	uint16		buf;

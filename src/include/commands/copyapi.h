@@ -67,7 +67,7 @@ extern CopyFromRoutine CopyFromRoutineBinary;
 typedef struct CopyToStateData *CopyToState;
 
 typedef bool (*CopyToProcessOption_function) (CopyToState cstate, DefElem *defel);
-typedef int16 (*CopyToGetFormat_function) (CopyToState cstate);
+typedef void (*CopyToSendCopyBegin_function) (CopyToState cstate);
 typedef void (*CopyToStart_function) (CopyToState cstate, TupleDesc tupDesc);
 typedef void (*CopyToOneRow_function) (CopyToState cstate, TupleTableSlot *slot);
 typedef void (*CopyToEnd_function) (CopyToState cstate);
@@ -84,10 +84,9 @@ typedef struct CopyToRoutine
 	CopyToProcessOption_function CopyToProcessOption;
 
 	/*
-	 * Called when COPY TO is started. This will return a format as int16
-	 * value. It's used for the CopyOutResponse message.
+	 * Called when COPY TO is started.
 	 */
-	CopyToGetFormat_function CopyToGetFormat;
+	CopyToSendCopyBegin_function CopyToSendCopyBegin;
 
 	/* Called when COPY TO is started. This will send a header. */
 	CopyToStart_function CopyToStart;
@@ -384,6 +383,11 @@ typedef struct CopyToStateData
 	void	   *opaque;			/* private space */
 } CopyToStateData;
 
+extern void CopySendData(CopyToState cstate, const void *databuf, int datasize);
+extern void CopySendString(CopyToState cstate, const char *str);
+extern void CopySendChar(CopyToState cstate, char c);
+extern void CopySendInt32(CopyToState cstate, int32 val);
+extern void CopySendInt16(CopyToState cstate, int16 val);
 extern void CopyToStateFlush(CopyToState cstate);
 
 #endif							/* COPYAPI_H */
