@@ -110,3 +110,14 @@ SELECT * FROM vegetables WHERE genus = 'daucus';
 -- Also test a case that involves a write.
 EXPLAIN (RANGE_TABLE, COSTS OFF)
 INSERT INTO vegetables (name, genus) VALUES ('broccoflower', 'brassica');
+
+-- Property graph test
+CREATE PROPERTY GRAPH vegetables_graph
+VERTEX TABLES
+(
+	daucus KEY(name) DEFAULT LABEL LABEL vegetables,
+	brassica KEY(name) DEFAULT LABEL LABEL vegetables
+);
+
+EXPLAIN (RANGE_TABLE, COSTS OFF)
+SELECT * FROM GRAPH_TABLE (vegetables_graph MATCH (v1:vegetables) WHERE v1.genus = 'daucus' COLUMNS (v1.name));
