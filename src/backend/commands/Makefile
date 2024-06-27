@@ -48,6 +48,7 @@ OBJS = \
 	portalcmds.o \
 	prepare.o \
 	proclang.o \
+	propgraphcmds.o \
 	publicationcmds.o \
 	schemacmds.o \
 	seclabel.o \
