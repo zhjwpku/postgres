@@ -284,6 +284,9 @@ exprType(const Node *expr)
 		case T_PlaceHolderVar:
 			type = exprType((Node *) ((const PlaceHolderVar *) expr)->phexpr);
 			break;
+		case T_GraphPropertyRef:
+			type = ((const GraphPropertyRef *) expr)->typeId;
+			break;
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(expr));
 			type = InvalidOid;	/* keep compiler quiet */
@@ -536,6 +539,9 @@ exprTypmod(const Node *expr)
 			return exprTypmod((Node *) ((const ReturningExpr *) expr)->retexpr);
 		case T_PlaceHolderVar:
 			return exprTypmod((Node *) ((const PlaceHolderVar *) expr)->phexpr);
+		case T_GraphPropertyRef:
+			/* TODO */
+			return -1;
 		default:
 			break;
 	}
@@ -1057,6 +1063,9 @@ exprCollation(const Node *expr)
 			break;
 		case T_PlaceHolderVar:
 			coll = exprCollation((Node *) ((const PlaceHolderVar *) expr)->phexpr);
+			break;
+		case T_GraphPropertyRef:
+			coll = DEFAULT_COLLATION_OID;	/* FIXME */
 			break;
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(expr));
@@ -2128,6 +2137,7 @@ expression_tree_walker_impl(Node *node,
 		case T_RangeTblRef:
 		case T_SortGroupClause:
 		case T_CTESearchClause:
+		case T_GraphPropertyRef:
 		case T_MergeSupportFunc:
 			/* primitive node types with no expression subnodes */
 			break;
@@ -2668,6 +2678,26 @@ expression_tree_walker_impl(Node *node,
 					return true;
 			}
 			break;
+		case T_GraphElementPattern:
+			{
+				GraphElementPattern *gep = (GraphElementPattern *) node;
+
+				if (WALK(gep->subexpr))
+					return true;
+				if (WALK(gep->whereClause))
+					return true;
+			}
+			break;
+		case T_GraphPattern:
+			{
+				GraphPattern *gp = (GraphPattern *) node;
+
+				if (LIST_WALK(gp->path_pattern_list))
+					return true;
+				if (WALK(gp->whereClause))
+					return true;
+			}
+			break;
 		default:
 			elog(ERROR, "unrecognized node type: %d",
 				 (int) nodeTag(node));
@@ -2859,6 +2889,12 @@ range_table_entry_walker_impl(RangeTblEntry *rte,
 			break;
 		case RTE_VALUES:
 			if (WALK(rte->values_lists))
+				return true;
+			break;
+		case RTE_GRAPH_TABLE:
+			if (WALK(rte->graph_pattern))
+				return true;
+			if (WALK(rte->graph_table_columns))
 				return true;
 			break;
 		case RTE_CTE:
@@ -3913,6 +3949,10 @@ range_table_mutator_impl(List *rtable,
 			case RTE_VALUES:
 				MUTATE(newrte->values_lists, rte->values_lists, List *);
 				break;
+			case RTE_GRAPH_TABLE:
+				MUTATE(newrte->graph_pattern, rte->graph_pattern, GraphPattern *);
+				MUTATE(newrte->graph_table_columns, rte->graph_table_columns, List *);
+				break;
 			case RTE_CTE:
 			case RTE_NAMEDTUPLESTORE:
 			case RTE_RESULT:
@@ -4547,6 +4587,18 @@ raw_expression_tree_walker_impl(Node *node,
 					return true;
 			}
 			break;
+		case T_RangeGraphTable:
+			{
+				RangeGraphTable *rgt = (RangeGraphTable *) node;
+
+				if (WALK(rgt->graph_pattern))
+					return true;
+				if (WALK(rgt->columns))
+					return true;
+				if (WALK(rgt->alias))
+					return true;
+			}
+			break;
 		case T_TypeName:
 			{
 				TypeName   *tn = (TypeName *) node;
@@ -4702,6 +4754,26 @@ raw_expression_tree_walker_impl(Node *node,
 				if (WALK(jaqc->output))
 					return true;
 				if (WALK(jaqc->query))
+					return true;
+			}
+			break;
+		case T_GraphElementPattern:
+			{
+				GraphElementPattern *gep = (GraphElementPattern *) node;
+
+				if (WALK(gep->subexpr))
+					return true;
+				if (WALK(gep->whereClause))
+					return true;
+			}
+			break;
+		case T_GraphPattern:
+			{
+				GraphPattern *gp = (GraphPattern *) node;
+
+				if (WALK(gp->path_pattern_list))
+					return true;
+				if (WALK(gp->whereClause))
 					return true;
 			}
 			break;
