@@ -1066,6 +1066,7 @@ permissionsList(const char *pattern, bool showSystem)
 					  " WHEN " CppAsString2(RELKIND_MATVIEW) " THEN '%s'"
 					  " WHEN " CppAsString2(RELKIND_SEQUENCE) " THEN '%s'"
 					  " WHEN " CppAsString2(RELKIND_FOREIGN_TABLE) " THEN '%s'"
+					  " WHEN " CppAsString2(RELKIND_PROPGRAPH) " THEN '%s'"
 					  " WHEN " CppAsString2(RELKIND_PARTITIONED_TABLE) " THEN '%s'"
 					  " END as \"%s\",\n"
 					  "  ",
@@ -1076,6 +1077,7 @@ permissionsList(const char *pattern, bool showSystem)
 					  gettext_noop("materialized view"),
 					  gettext_noop("sequence"),
 					  gettext_noop("foreign table"),
+					  gettext_noop("property graph"),
 					  gettext_noop("partitioned table"),
 					  gettext_noop("Type"));
 
@@ -1167,6 +1169,7 @@ permissionsList(const char *pattern, bool showSystem)
 						 CppAsString2(RELKIND_MATVIEW) ","
 						 CppAsString2(RELKIND_SEQUENCE) ","
 						 CppAsString2(RELKIND_FOREIGN_TABLE) ","
+						 CppAsString2(RELKIND_PROPGRAPH) ","
 						 CppAsString2(RELKIND_PARTITIONED_TABLE) ")\n");
 
 	if (!showSystem && !pattern)
@@ -2045,6 +2048,10 @@ describeOneTableDetails(const char *schemaname,
 			else
 				printfPQExpBuffer(&title, _("Partitioned table \"%s.%s\""),
 								  schemaname, relationname);
+			break;
+		case RELKIND_PROPGRAPH:
+			printfPQExpBuffer(&title, _("Property graph \"%s.%s\""),
+							  schemaname, relationname);
 			break;
 		default:
 			/* untranslated unknown relkind */
@@ -3145,6 +3152,32 @@ describeOneTableDetails(const char *schemaname,
 		}
 	}
 
+	/* Add property graph definition in verbose mode */
+	if (tableinfo.relkind == RELKIND_PROPGRAPH && verbose)
+	{
+		PGresult   *result;
+		char	   *pgdef = NULL;
+
+		printfPQExpBuffer(&buf,
+						  "SELECT pg_catalog.pg_get_propgraphdef('%s'::pg_catalog.oid);",
+						  oid);
+		result = PSQLexec(buf.data);
+		if (!result)
+			goto error_return;
+
+		if (PQntuples(result) > 0)
+			pgdef = pg_strdup(PQgetvalue(result, 0, 0));
+
+		PQclear(result);
+
+		if (pgdef)
+		{
+			printTableAddFooter(&cont, _("Property graph definition:"));
+			printfPQExpBuffer(&buf, " %s", pgdef);
+			printTableAddFooter(&cont, buf.data);
+		}
+	}
+
 	/* Get view_def if table is a view or materialized view */
 	if ((tableinfo.relkind == RELKIND_VIEW ||
 		 tableinfo.relkind == RELKIND_MATVIEW) && verbose)
@@ -3998,6 +4031,7 @@ describeRoleGrants(const char *pattern, bool showSystem)
  * m - materialized views
  * s - sequences
  * E - foreign table (Note: different from 'f', the relkind value)
+ * G - property graphs
  * (any order of the above is fine)
  */
 bool
@@ -4009,6 +4043,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 	bool		showMatViews = strchr(tabtypes, 'm') != NULL;
 	bool		showSeq = strchr(tabtypes, 's') != NULL;
 	bool		showForeign = strchr(tabtypes, 'E') != NULL;
+	bool		showPropGraphs = strchr(tabtypes, 'G') != NULL;
 
 	PQExpBufferData buf;
 	PGresult   *res;
@@ -4017,8 +4052,8 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 	bool		translate_columns[] = {false, false, true, false, false, false, false, false, false};
 
 	/* If tabtypes is empty, we default to \dtvmsE (but see also command.c) */
-	if (!(showTables || showIndexes || showViews || showMatViews || showSeq || showForeign))
-		showTables = showViews = showMatViews = showSeq = showForeign = true;
+	if (!(showTables || showIndexes || showViews || showMatViews || showSeq || showForeign || showPropGraphs))
+		showTables = showViews = showMatViews = showSeq = showForeign = showPropGraphs = true;
 
 	initPQExpBuffer(&buf);
 
@@ -4035,6 +4070,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 					  " WHEN " CppAsString2(RELKIND_FOREIGN_TABLE) " THEN '%s'"
 					  " WHEN " CppAsString2(RELKIND_PARTITIONED_TABLE) " THEN '%s'"
 					  " WHEN " CppAsString2(RELKIND_PARTITIONED_INDEX) " THEN '%s'"
+					  " WHEN " CppAsString2(RELKIND_PROPGRAPH) " THEN '%s'"
 					  " END as \"%s\",\n"
 					  "  pg_catalog.pg_get_userbyid(c.relowner) as \"%s\"",
 					  gettext_noop("Schema"),
@@ -4048,6 +4084,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 					  gettext_noop("foreign table"),
 					  gettext_noop("partitioned table"),
 					  gettext_noop("partitioned index"),
+					  gettext_noop("property graph"),
 					  gettext_noop("Type"),
 					  gettext_noop("Owner"));
 	cols_so_far = 4;
@@ -4135,6 +4172,8 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 		appendPQExpBufferStr(&buf, "'s',"); /* was RELKIND_SPECIAL */
 	if (showForeign)
 		appendPQExpBufferStr(&buf, CppAsString2(RELKIND_FOREIGN_TABLE) ",");
+	if (showPropGraphs)
+		appendPQExpBufferStr(&buf, CppAsString2(RELKIND_PROPGRAPH) ",");
 
 	appendPQExpBufferStr(&buf, "''");	/* dummy */
 	appendPQExpBufferStr(&buf, ")\n");
