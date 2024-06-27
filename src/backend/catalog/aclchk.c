@@ -291,6 +291,9 @@ restrict_and_check_grant(bool is_grant, AclMode avail_goptions, bool all_privs,
 		case OBJECT_PARAMETER_ACL:
 			whole_mask = ACL_ALL_RIGHTS_PARAMETER_ACL;
 			break;
+		case OBJECT_PROPGRAPH:
+			whole_mask = ACL_ALL_RIGHTS_PROPGRAPH;
+			break;
 		default:
 			elog(ERROR, "unrecognized object type: %d", objtype);
 			/* not reached, but keep compiler quiet */
@@ -535,6 +538,10 @@ ExecuteGrantStmt(GrantStmt *stmt)
 			all_privileges = ACL_ALL_RIGHTS_PARAMETER_ACL;
 			errormsg = gettext_noop("invalid privilege type %s for parameter");
 			break;
+		case OBJECT_PROPGRAPH:
+			all_privileges = ACL_ALL_RIGHTS_PROPGRAPH;
+			errormsg = gettext_noop("invalid privilege type %s for property graph");
+			break;
 		default:
 			elog(ERROR, "unrecognized GrantStmt.objtype: %d",
 				 (int) stmt->objtype);
@@ -605,6 +612,7 @@ ExecGrantStmt_oids(InternalGrant *istmt)
 	{
 		case OBJECT_TABLE:
 		case OBJECT_SEQUENCE:
+		case OBJECT_PROPGRAPH:
 			ExecGrant_Relation(istmt);
 			break;
 		case OBJECT_DATABASE:
@@ -687,6 +695,7 @@ objectNamesToOids(ObjectType objtype, List *objnames, bool is_grant)
 
 		case OBJECT_TABLE:
 		case OBJECT_SEQUENCE:
+		case OBJECT_PROPGRAPH:
 
 			/*
 			 * Here, we don't use get_object_address().  It requires that the
@@ -802,6 +811,10 @@ objectsInSchemaToOids(ObjectType objtype, List *nspnames)
 				break;
 			case OBJECT_SEQUENCE:
 				objs = getRelationsInNamespace(namespaceId, RELKIND_SEQUENCE);
+				objects = list_concat(objects, objs);
+				break;
+			case OBJECT_PROPGRAPH:
+				objs = getRelationsInNamespace(namespaceId, RELKIND_PROPGRAPH);
 				objects = list_concat(objects, objs);
 				break;
 			case OBJECT_FUNCTION:
@@ -1004,6 +1017,10 @@ ExecAlterDefaultPrivilegesStmt(ParseState *pstate, AlterDefaultPrivilegesStmt *s
 		case OBJECT_SCHEMA:
 			all_privileges = ACL_ALL_RIGHTS_SCHEMA;
 			errormsg = gettext_noop("invalid privilege type %s for schema");
+			break;
+		case OBJECT_PROPGRAPH:
+			all_privileges = ACL_ALL_RIGHTS_PROPGRAPH;
+			errormsg = gettext_noop("invalid privilege type %s for property graph");
 			break;
 		default:
 			elog(ERROR, "unrecognized GrantStmt.objtype: %d",
@@ -2699,6 +2716,9 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
 					case OBJECT_PROCEDURE:
 						msg = gettext_noop("permission denied for procedure %s");
 						break;
+					case OBJECT_PROPGRAPH:
+						msg = gettext_noop("permission denied for property graph %s");
+						break;
 					case OBJECT_PUBLICATION:
 						msg = gettext_noop("permission denied for publication %s");
 						break;
@@ -2824,6 +2844,9 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
 						break;
 					case OBJECT_PROCEDURE:
 						msg = gettext_noop("must be owner of procedure %s");
+						break;
+					case OBJECT_PROPGRAPH:
+						msg = gettext_noop("must be owner of property graph %s");
 						break;
 					case OBJECT_PUBLICATION:
 						msg = gettext_noop("must be owner of publication %s");
@@ -2961,6 +2984,7 @@ pg_aclmask(ObjectType objtype, Oid object_oid, AttrNumber attnum, Oid roleid,
 				pg_attribute_aclmask(object_oid, attnum, roleid, mask, how);
 		case OBJECT_TABLE:
 		case OBJECT_SEQUENCE:
+		case OBJECT_PROPGRAPH:
 			return pg_class_aclmask(object_oid, roleid, mask, how);
 		case OBJECT_DATABASE:
 			return object_aclmask(DatabaseRelationId, object_oid, roleid, mask, how);
