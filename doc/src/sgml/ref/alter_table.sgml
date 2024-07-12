@@ -39,11 +39,11 @@ ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     DETACH PARTITION <replaceable class="parameter">partition_name</replaceable> [ CONCURRENTLY | FINALIZE ]
 ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     SPLIT PARTITION <replaceable class="parameter">partition_name</replaceable> INTO
-        (PARTITION <replaceable class="parameter">partition_name1</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT },
-         PARTITION <replaceable class="parameter">partition_name2</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT } [, ...])
+        (PARTITION <replaceable class="parameter">partition_name1</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT } [ TABLESPACE <replaceable class="parameter">tablespace_name</replaceable> ],
+         PARTITION <replaceable class="parameter">partition_name2</replaceable> { FOR VALUES <replaceable class="parameter">partition_bound_spec</replaceable> | DEFAULT } [ TABLESPACE <replaceable class="parameter">tablespace_name</replaceable> ] [, ...])
 ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     MERGE PARTITIONS (<replaceable class="parameter">partition_name1</replaceable>, <replaceable class="parameter">partition_name2</replaceable> [, ...])
-        INTO <replaceable class="parameter">partition_name</replaceable>
+        INTO <replaceable class="parameter">partition_name</replaceable> [ TABLESPACE <replaceable class="parameter">tablespace_name</replaceable> ]
 
 <phrase>where <replaceable class="parameter">action</replaceable> is one of:</phrase>
 
