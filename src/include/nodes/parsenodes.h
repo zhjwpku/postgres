@@ -950,12 +950,13 @@ typedef struct SinglePartitionSpec
 } SinglePartitionSpec;
 
 /*
- * PartitionCmd - info for ALTER TABLE/INDEX ATTACH/DETACH PARTITION commands
+ * PartitionCmd - info for ALTER TABLE/INDEX ATTACH/DETACH/MERGE/SPLIT PARTITION commands
  */
 typedef struct PartitionCmd
 {
 	NodeTag		type;
-	RangeVar   *name;			/* name of partition to attach/detach */
+	RangeVar   *name;			/* name of partition to
+								 * attach/detach/merge/split */
 	PartitionBoundSpec *bound;	/* FOR VALUES, if attaching */
 	List	   *partlist;		/* list of partitions, for MERGE/SPLIT
 								 * PARTITION command */
