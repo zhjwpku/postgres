@@ -96,7 +96,7 @@ SELECT pg_get_propgraphdef('g5'::regclass);
          t12 KEY (b) PROPERTIES (b)                                                                               +
      )                                                                                                            +
      EDGE TABLES (                                                                                                +
-         t13 KEY (c) SOURCE KEY (e) REFERENCES t11 (a) DESTINATION KEY (e) REFERENCES t12 (b) PROPERTIES (c, d, e)+
+         t13 KEY (c) SOURCE KEY (d) REFERENCES t11 (a) DESTINATION KEY (e) REFERENCES t12 (b) PROPERTIES (c, d, e)+
      )
 (1 row)
 
@@ -255,7 +255,7 @@ SELECT * FROM information_schema.pg_edge_table_components ORDER BY property_grap
  regression             | create_property_graph_tests | g4                  | e2               | t1                 | SOURCE      | a                      | a                        |                1
  regression             | create_property_graph_tests | g4                  | e2               | t3                 | DESTINATION | x                      | x                        |                1
  regression             | create_property_graph_tests | g4                  | e2               | t3                 | DESTINATION | t                      | y                        |                2
- regression             | create_property_graph_tests | g5                  | t13              | t11                | SOURCE      | e                      | a                        |                1
+ regression             | create_property_graph_tests | g5                  | t13              | t11                | SOURCE      | d                      | a                        |                1
  regression             | create_property_graph_tests | g5                  | t13              | t12                | DESTINATION | e                      | b                        |                1
 (12 rows)
 
