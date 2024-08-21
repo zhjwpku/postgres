@@ -4444,4 +4444,10 @@ typedef struct DropSubscriptionStmt
 	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
 } DropSubscriptionStmt;
 
+typedef struct GraphTableParseState
+{
+	Oid			graphid;
+	List	   *variables;
+} GraphTableParseState;
+
 #endif							/* PARSENODES_H */
