@@ -2171,6 +2171,7 @@ addRangeTableEntryForGraphTable(ParseState *pstate,
 	rte->graph_pattern = graph_pattern;
 	rte->graph_table_columns = columns;
 	rte->alias = alias;
+	rte->rellockmode = AccessShareLock;
 
 	eref = alias ? copyObject(alias) : makeAlias(refname, NIL);
 

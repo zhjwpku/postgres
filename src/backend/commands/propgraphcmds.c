@@ -377,18 +377,16 @@ propgraph_edge_get_ref_keys(ParseState *pstate, const List *keycols, const List 
 	}
 	else
 	{
-		List	   *fkeys;
-		ListCell   *lc;
 		int			count = 0;
 		ForeignKeyCacheInfo *fk = NULL;
 
-		fkeys = RelationGetFKeyList(edge_rel);
-		foreach(lc, fkeys)
+		foreach_node(ForeignKeyCacheInfo, tmp, RelationGetFKeyList(edge_rel))
 		{
-			fk = lfirst_node(ForeignKeyCacheInfo, lc);
-
-			if (fk->confrelid == RelationGetRelid(ref_rel))
+			if (tmp->confrelid == RelationGetRelid(ref_rel))
+			{
+				fk = tmp;
 				count++;
+			}
 		}
 
 		if (count == 0)
