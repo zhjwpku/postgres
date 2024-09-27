@@ -16,11 +16,13 @@
 #include "common/int.h"
 #include "common/pg_prng.h"
 #include "libpq/pqformat.h"
+#include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
+#include "utils/tuplesort.h"
 #include "utils/typcache.h"
 
 /*
@@ -41,6 +43,18 @@ typedef struct DeserialIOData
 	FmgrInfo	typreceive;
 	Oid			typioparam;
 } DeserialIOData;
+
+/*
+ * ArraySortCachedInfo
+ *		Used for caching data in array_sort
+ */
+typedef struct ArraySortCachedInfo
+{
+	TypeCacheEntry *typentry;	/* type cache entry for element type */
+	TypeCacheEntry *array_typentry; /* type cache entry for array type */
+	ArrayMetaState array_meta;	/* array metadata for better
+								 * array_create_iterator performance */
+} ArraySortCachedInfo;
 
 static Datum array_position_common(FunctionCallInfo fcinfo);
 
@@ -1796,4 +1810,128 @@ array_reverse(PG_FUNCTION_ARGS)
 	result = array_reverse_n(array, elmtyp, typentry);
 
 	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+/*
+ * array_sort
+ *
+ * Sorts the first dimension of the array.
+ * The sort order is determined by the "<" operator of the element type.
+ */
+Datum
+array_sort(PG_FUNCTION_ARGS)
+{
+	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(0);
+	Oid			elmtyp;
+	Oid			array_type;
+	Oid			collation = PG_GET_COLLATION();
+	ArraySortCachedInfo *cache_info;
+	TypeCacheEntry *typentry;
+	Tuplesortstate *tuplesortstate;
+	ArrayIterator array_iterator;
+	Datum		value;
+	bool		isnull;
+	ArrayBuildStateAny *astate = NULL;
+	int			ndim,
+			   *dims,
+			   *lbs;
+
+	ndim = ARR_NDIM(array);
+	dims = ARR_DIMS(array);
+	lbs = ARR_LBOUND(array);
+
+	elmtyp = ARR_ELEMTYPE(array);
+	cache_info = (ArraySortCachedInfo *) fcinfo->flinfo->fn_extra;
+	if (cache_info == NULL)
+	{
+		cache_info = (ArraySortCachedInfo *) MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+																sizeof(ArraySortCachedInfo));
+		cache_info->typentry = NULL;
+		cache_info->array_typentry = NULL;
+		fcinfo->flinfo->fn_extra = (void *) cache_info;
+	}
+
+	if (ndim == 1)
+	{
+		/* Finds the ordering operator for the type for 1-D arrays */
+		typentry = cache_info->typentry;
+		if (typentry == NULL || typentry->type_id != elmtyp)
+		{
+			typentry = lookup_type_cache(elmtyp, TYPECACHE_LT_OPR);
+			if (!OidIsValid(typentry->lt_opr))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_FUNCTION),
+						 errmsg("could not identify ordering operator for type %s",
+								format_type_be(elmtyp))));
+			cache_info->typentry = typentry;
+			cache_info->array_meta.element_type = elmtyp;
+			cache_info->array_meta.typlen = typentry->typlen;
+			cache_info->array_meta.typbyval = typentry->typbyval;
+			cache_info->array_meta.typalign = typentry->typalign;
+		}
+	}
+	else
+	{
+		/* Finds the ordering operator for the array type for multi-D arrays */
+		typentry = cache_info->array_typentry;
+		if (typentry == NULL || typentry->typelem != elmtyp)
+		{
+			array_type = get_array_type(elmtyp);
+			if (!OidIsValid(array_type))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("could not find array type for data type %s",
+								format_type_be(elmtyp))));
+			typentry = lookup_type_cache(array_type, TYPECACHE_LT_OPR);
+			if (!OidIsValid(typentry->lt_opr))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_FUNCTION),
+						 errmsg("could not identify ordering operator for type %s",
+								format_type_be(array_type))));
+			cache_info->array_typentry = typentry;
+		}
+		cache_info->array_meta.element_type = elmtyp;
+		get_typlenbyvalalign(elmtyp,
+							 &cache_info->array_meta.typlen,
+							 &cache_info->array_meta.typbyval,
+							 &cache_info->array_meta.typalign);
+	}
+
+	if (ndim < 1 || dims[0] < 2)
+		PG_RETURN_ARRAYTYPE_P(array);
+
+	tuplesortstate = tuplesort_begin_datum(typentry->type_id,
+										   typentry->lt_opr,
+										   collation,
+										   false, work_mem, NULL, false);
+
+	array_iterator = array_create_iterator(array, ndim - 1, &cache_info->array_meta);
+	while (array_iterate(array_iterator, &value, &isnull))
+	{
+		tuplesort_putdatum(tuplesortstate, value, isnull);
+	}
+	array_free_iterator(array_iterator);
+
+	/*
+	 * Do the sort.
+	 */
+	tuplesort_performsort(tuplesortstate);
+
+	while (tuplesort_getdatum(tuplesortstate, true, false, &value, &isnull, NULL))
+	{
+		astate = accumArrayResultAny(astate, value, isnull,
+									 typentry->type_id, CurrentMemoryContext);
+	}
+
+	tuplesort_end(tuplesortstate);
+
+	/* bounds preservation */
+	if (ndim == 1)
+		astate->scalarstate->lb = lbs[0];
+	else
+		astate->arraystate->lbs[0] = lbs[0];
+
+	/* Avoid leaking memory when handed toasted input */
+	PG_FREE_IF_COPY(array, 0);
+	PG_RETURN_DATUM(makeArrayResultAny(astate, CurrentMemoryContext, true));
 }

@@ -5330,6 +5330,7 @@ initArrayResultWithSize(Oid element_type, MemoryContext rcontext,
 		MemoryContextAlloc(arr_context, astate->alen * sizeof(bool));
 	astate->nelems = 0;
 	astate->element_type = element_type;
+	astate->lb = 1;				/* default lower bound */
 	get_typlenbyvalalign(element_type,
 						 &astate->typlen,
 						 &astate->typbyval,
@@ -5867,7 +5868,7 @@ makeArrayResultAny(ArrayBuildStateAny *astate,
 		/* If no elements were presented, we want to create an empty array */
 		ndims = (astate->scalarstate->nelems > 0) ? 1 : 0;
 		dims[0] = astate->scalarstate->nelems;
-		lbs[0] = 1;
+		lbs[0] = astate->scalarstate->lb;
 
 		result = makeMdArrayResult(astate->scalarstate, ndims, dims, lbs,
 								   rcontext, release);

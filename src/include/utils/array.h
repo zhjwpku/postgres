@@ -192,6 +192,7 @@ typedef struct ArrayBuildState
 	int			alen;			/* allocated length of above arrays */
 	int			nelems;			/* number of valid entries in above arrays */
 	Oid			element_type;	/* data type of the Datums */
+	int			lb;				/* lower bound for one dimension array */
 	int16		typlen;			/* needed info about datatype */
 	bool		typbyval;
 	char		typalign;

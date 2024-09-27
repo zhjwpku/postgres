@@ -150,6 +150,7 @@ ArrayIOData
 ArrayIterator
 ArrayMapState
 ArrayMetaState
+ArraySortCachedInfo
 ArraySubWorkspace
 ArrayToken
 ArrayType

@@ -20440,6 +20440,24 @@ SELECT NULLIF(value, '(none)') ...
 
       <row>
        <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>array_sort</primary>
+        </indexterm>
+        <function>array_sort</function> ( <type>anyarray</type> )
+        <returnvalue>anyarray</returnvalue>
+       </para>
+       <para>
+        Sorts the first dimension of the array. The sort order is determined by the <literal>&lt;</literal> operator of the element type, nulls will appear after non-null values.
+        The collation to use can be forced by adding a <literal>COLLATE</literal> clause to any of the arguments.
+       </para>
+       <para>
+        <literal>array_sort(ARRAY[[2,4],[2,1],[6,5]])</literal>
+        <returnvalue>{{2,1},{2,4},{6,5}}</returnvalue>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
         <indexterm id="function-array-to-string">
          <primary>array_to_string</primary>
         </indexterm>
