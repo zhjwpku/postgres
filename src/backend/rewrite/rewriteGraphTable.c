@@ -21,6 +21,7 @@
 #include "catalog/pg_propgraph_property.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/analyze.h"
 #include "parser/parse_node.h"
 #include "parser/parse_relation.h"
@@ -383,6 +384,7 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 	Query	   *path_query = makeNode(Query);
 	List	   *fromlist = NIL;
 	List	   *qual_exprs = NIL;
+	List	   *vars;
 
 	path_query->commandType = CMD_SELECT;
 
@@ -496,6 +498,22 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 									  replace_property_refs(rte->relid,
 															(Node *) rte->graph_table_columns,
 															graph_path));
+
+	/*
+	 * Mark the columns being accessed in the path query as requiring SELECT
+	 * privilege. Any lateral columns should have been handled when the
+	 * corresponding ColumnRefs were transformed. Ignore those here.
+	 */
+	vars = pull_vars_of_level((Node *) list_make2(qual_exprs, path_query->targetList), 0);
+	foreach_node(Var, var, vars)
+	{
+		RTEPermissionInfo *perminfo = getRTEPermissionInfo(path_query->rteperminfos,
+														   rt_fetch(var->varno, path_query->rtable));
+
+		/* Must offset the attnum to fit in a bitmapset */
+		perminfo->selectedCols = bms_add_member(perminfo->selectedCols,
+												var->varattno - FirstLowInvalidHeapAttributeNumber);
+	}
 	return path_query;
 }
 

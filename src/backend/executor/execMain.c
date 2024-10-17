@@ -675,7 +675,7 @@ ExecCheckPermissions(List *rangeTable, List *rteperminfos,
 
 			/*
 			 * Only relation RTEs and subquery RTEs that were once relation
-			 * RTEs (views) have their perminfoindex set.
+			 * RTEs (views, property graph tables) have their perminfoindex set.
 			 */
 			Assert(rte->rtekind == RTE_RELATION ||
 				   (rte->rtekind == RTE_SUBQUERY &&
