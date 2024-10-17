@@ -276,6 +276,14 @@ CREATE PROPERTY GRAPH g1
    Property graphs are queried using the <literal>GRAPH_TABLE</literal> clause
    of <xref linkend="sql-select"/>.
   </para>
+
+  <para>
+   Access to the base relations underlying the <literal>GRAPH_TABLE</literal>
+   clause is determined by the permissions of the user executing the query,
+   rather than the property graph owner. Thus, the user of a property graph must
+   have the relevant permissions on the property graph and base relations
+   underlying the <literal>GRAPH_TABLE</literal> clause.
+  </para>
  </refsect1>
 
  <refsect1>
