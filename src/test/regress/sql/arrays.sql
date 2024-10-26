@@ -843,6 +843,16 @@ SELECT array_sort('{1.1,3.3,5.5,2.2,4.4,6.6}'::numeric[]);
 SELECT array_sort('{foo,bar,CCC,Abc,bbc}'::text[] COLLATE "C");
 SELECT array_sort('{foo,bar,null,CCC,Abc,bbc}'::text[] COLLATE "C");
 
+-- array_sort with order specified
+SELECT array_sort('{1.1,3.3,5.5,2.2,null,4.4,6.6}'::float8[], true);
+SELECT array_sort('{1.1,3.3,5.5,2.2,null,4.4,6.6}'::float8[], false);
+
+-- array_sort with order and nullsfirst flag specified
+SELECT array_sort('{1.1,3.3,5.5,2.2,null,4.4,6.6}'::float8[], true, true);
+SELECT array_sort('{1.1,3.3,5.5,2.2,null,4.4,6.6}'::float8[], true, false);
+SELECT array_sort('{1.1,3.3,5.5,2.2,null,4.4,6.6}'::float8[], false, true);
+SELECT array_sort('{1.1,3.3,5.5,2.2,null,4.4,6.6}'::float8[], false, false);
+
 -- multidimensional array tests
 SELECT array_sort('{{1}}'::int[]);
 SELECT array_sort(ARRAY[[2,4],[2,1],[6,5]]);

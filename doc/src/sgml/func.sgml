@@ -20443,12 +20443,16 @@ SELECT NULLIF(value, '(none)') ...
         <indexterm>
          <primary>array_sort</primary>
         </indexterm>
-        <function>array_sort</function> ( <type>anyarray</type> )
+        <function>array_sort</function> ( <type>anyarray</type> <optional>, <parameter>is_ascending</parameter> <type>boolean</type> <optional>, <parameter>nulls_first</parameter> <type>boolean</type></optional></optional>)
         <returnvalue>anyarray</returnvalue>
        </para>
        <para>
         Sorts the first dimension of the array. The sort order is determined by the <literal>&lt;</literal> operator of the element type, nulls will appear after non-null values.
         The collation to use can be forced by adding a <literal>COLLATE</literal> clause to any of the arguments.
+        If <parameter>is_ascending</parameter> is true then sort by ascending order, otherwise descending order.
+        <parameter>is_ascending</parameter> defaults to true.
+        If <parameter>nulls_first</parameter> is true then nulls appear before non-null values, otherwise nulls appear after non-null values.
+        <parameter>nulls_first</parameter> defaults to the opposite of <parameter>is_ascending</parameter> if not provided.
        </para>
        <para>
         <literal>array_sort(ARRAY[[2,4],[2,1],[6,5]])</literal>

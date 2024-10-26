@@ -1816,7 +1816,6 @@ array_reverse(PG_FUNCTION_ARGS)
  * array_sort
  *
  * Sorts the first dimension of the array.
- * The sort order is determined by the "<" operator of the element type.
  */
 Datum
 array_sort(PG_FUNCTION_ARGS)
@@ -1835,10 +1834,23 @@ array_sort(PG_FUNCTION_ARGS)
 	int			ndim,
 			   *dims,
 			   *lbs;
+	bool		is_ascending = true;
+	bool		nulls_first = false;
 
 	ndim = ARR_NDIM(array);
 	dims = ARR_DIMS(array);
 	lbs = ARR_LBOUND(array);
+
+	if (PG_NARGS() > 1)
+	{
+		is_ascending = PG_GETARG_BOOL(1);
+
+		/*
+		 * If nulls_first not provided, it defaults to the opposite of
+		 * is_ascending.
+		 */
+		nulls_first = PG_NARGS() > 2 ? PG_GETARG_BOOL(2) : !is_ascending;
+	}
 
 	elmtyp = ARR_ELEMTYPE(array);
 	cache_info = (ArraySortCachedInfo *) fcinfo->flinfo->fn_extra;
@@ -1857,8 +1869,10 @@ array_sort(PG_FUNCTION_ARGS)
 		typentry = cache_info->typentry;
 		if (typentry == NULL || typentry->type_id != elmtyp)
 		{
-			typentry = lookup_type_cache(elmtyp, TYPECACHE_LT_OPR);
-			if (!OidIsValid(typentry->lt_opr))
+			typentry = lookup_type_cache(elmtyp,
+										 is_ascending ? TYPECACHE_LT_OPR : TYPECACHE_GT_OPR);
+			if ((is_ascending && !OidIsValid(typentry->lt_opr)) ||
+				(!is_ascending && !OidIsValid(typentry->gt_opr)))
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_FUNCTION),
 						 errmsg("could not identify ordering operator for type %s",
@@ -1882,8 +1896,10 @@ array_sort(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_UNDEFINED_OBJECT),
 						 errmsg("could not find array type for data type %s",
 								format_type_be(elmtyp))));
-			typentry = lookup_type_cache(array_type, TYPECACHE_LT_OPR);
-			if (!OidIsValid(typentry->lt_opr))
+			typentry = lookup_type_cache(array_type,
+										 is_ascending ? TYPECACHE_LT_OPR : TYPECACHE_GT_OPR);
+			if ((is_ascending && !OidIsValid(typentry->lt_opr)) ||
+				(!is_ascending && !OidIsValid(typentry->gt_opr)))
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_FUNCTION),
 						 errmsg("could not identify ordering operator for type %s",
@@ -1901,9 +1917,9 @@ array_sort(PG_FUNCTION_ARGS)
 		PG_RETURN_ARRAYTYPE_P(array);
 
 	tuplesortstate = tuplesort_begin_datum(typentry->type_id,
-										   typentry->lt_opr,
+										   is_ascending ? typentry->lt_opr : typentry->gt_opr,
 										   collation,
-										   false, work_mem, NULL, false);
+										   nulls_first, work_mem, NULL, false);
 
 	array_iterator = array_create_iterator(array, ndim - 1, &cache_info->array_meta);
 	while (array_iterate(array_iterator, &value, &isnull))
@@ -1934,4 +1950,16 @@ array_sort(PG_FUNCTION_ARGS)
 	/* Avoid leaking memory when handed toasted input */
 	PG_FREE_IF_COPY(array, 0);
 	PG_RETURN_DATUM(makeArrayResultAny(astate, CurrentMemoryContext, true));
+}
+
+Datum
+array_sort_order(PG_FUNCTION_ARGS)
+{
+	return array_sort(fcinfo);
+}
+
+Datum
+array_sort_order_nulls_first(PG_FUNCTION_ARGS)
+{
+	return array_sort(fcinfo);
 }
