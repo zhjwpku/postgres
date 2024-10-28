@@ -147,6 +147,83 @@ GRANT SELECT ON PROPERTY GRAPH g1 TO regress_graph_user2;
 GRANT UPDATE ON PROPERTY GRAPH g1 TO regress_graph_user2;  -- fail
 RESET ROLE;
 
+-- collation
+CREATE TABLE tc1 (a int, b text);
+CREATE TABLE tc2 (a int, b text);
+CREATE TABLE tc3 (a int, b text COLLATE "C");
+
+CREATE TABLE ec1 (ek1 int, ek2 int, eb text);
+CREATE TABLE ec2 (ek1 int, ek2 int, eb text COLLATE "POSIX");
+
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a), tc2 KEY (a), tc3 KEY (a)); -- fail
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a), tc2 KEY (a))
+    EDGE TABLES (
+        ec1 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a),
+        ec2 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a)); -- fail
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a) DEFAULT LABEL PROPERTIES (a), tc3 KEY (b))
+    EDGE TABLES (
+        ec2 KEY (ek1, eb)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (eb) REFERENCES tc3 (b)); -- fail
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a), tc2 KEY (a))
+    EDGE TABLES (
+        ec1 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a));
+ALTER PROPERTY GRAPH gc1 ADD VERTEX TABLES (tc3 KEY (a)); -- fail
+ALTER PROPERTY GRAPH gc1 ADD EDGE TABLES (
+            ec2 KEY (ek1, ek2)
+                SOURCE KEY (ek1) REFERENCES tc1 (a)
+                DESTINATION KEY (ek2) REFERENCES tc2 (a)); -- fail
+ALTER PROPERTY GRAPH gc1
+    ADD VERTEX TABLES (
+        tc3 KEY (a) DEFAULT LABEL PROPERTIES (a, b COLLATE pg_catalog.DEFAULT AS b));
+ALTER PROPERTY GRAPH gc1 ADD EDGE TABLES (
+            ec2 KEY (ek1, ek2)
+                SOURCE KEY (ek1) REFERENCES tc1 (a)
+                DESTINATION KEY (ek2) REFERENCES tc2 (a)
+                DEFAULT LABEL PROPERTIES (ek1, ek2, eb COLLATE pg_catalog.DEFAULT AS eb));
+DROP PROPERTY GRAPH gc1;
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (
+        tc1 KEY (a) DEFAULT LABEL PROPERTIES (a, b::varchar COLLATE "C" AS b),
+        tc2 KEY (a) DEFAULT LABEL PROPERTIES (a, (b COLLATE "C")::varchar AS b),
+        tc3 KEY (a) DEFAULT LABEL PROPERTIES (a, b::varchar AS b))
+    EDGE TABLES (
+        ec1 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a)
+            DEFAULT LABEL PROPERTIES (ek1, ek2, eb),
+        ec2 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a)
+            DEFAULT LABEL PROPERTIES (ek1, ek2, eb COLLATE pg_catalog.DEFAULT AS eb));
+
+-- type incosistency check
+CREATE TABLE v1 (a int primary key, b text);
+CREATE TABLE e(k1 text, k2 text, c text);
+CREATE TABLE v2 (m text, n text);
+CREATE PROPERTY GRAPH gt
+    VERTEX TABLES (v1 KEY (a), v2 KEY (m))
+    EDGE TABLES (
+        e KEY (k1, k2)
+        SOURCE KEY (k1) REFERENCES v1(a)
+        DESTINATION KEY (k2) REFERENCES v2(m)); -- fail
+ALTER TABLE e DROP COLUMN k1, ADD COLUMN k1 bigint primary key;
+CREATE PROPERTY GRAPH gt
+    VERTEX TABLES (v1 KEY (a), v2 KEY (m))
+    EDGE TABLES (
+        e KEY (k1, k2)
+        SOURCE KEY (k1) REFERENCES v1(a)
+        DESTINATION KEY (k2) REFERENCES v2(m));
 
 -- information schema
 
