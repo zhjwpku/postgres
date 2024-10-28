@@ -72,6 +72,13 @@ INSERT INTO document VALUES
     ( 8, 44, 1, 'regress_rls_carol', 'great manga'),
     ( 9, 22, 1, 'regress_rls_dave', 'awesome science fiction'),
     (10, 33, 2, 'regress_rls_dave', 'awesome technology book');
+CREATE PROPERTY GRAPH acc_cat
+    VERTEX TABLES (uaccount, category)
+    EDGE TABLES (
+        document
+        SOURCE KEY (dauthor) REFERENCES uaccount (pguser)
+        DESTINATION KEY (cid) REFERENCES category (cid));
+GRANT ALL ON acc_cat TO public;
 ALTER TABLE document ENABLE ROW LEVEL SECURITY;
 -- user's security level must be higher than or equal to document's
 CREATE POLICY p1 ON document AS PERMISSIVE
@@ -93,24 +100,26 @@ CREATE POLICY p2r ON document AS RESTRICTIVE TO regress_rls_dave
 CREATE POLICY p1r ON document AS RESTRICTIVE TO regress_rls_dave
     USING (cid <> 44);
 \dp
-                                                                   Access privileges
-       Schema       |   Name   | Type  |              Access privileges               | Column privileges |                  Policies                  
---------------------+----------+-------+----------------------------------------------+-------------------+--------------------------------------------
- regress_rls_schema | category | table | regress_rls_alice=arwdDxtm/regress_rls_alice+|                   | 
-                    |          |       | =arwdDxtm/regress_rls_alice                  |                   | 
- regress_rls_schema | document | table | regress_rls_alice=arwdDxtm/regress_rls_alice+|                   | p1:                                       +
-                    |          |       | =arwdDxtm/regress_rls_alice                  |                   |   (u): (dlevel <= ( SELECT uaccount.seclv +
-                    |          |       |                                              |                   |    FROM uaccount                          +
-                    |          |       |                                              |                   |   WHERE (uaccount.pguser = CURRENT_USER)))+
-                    |          |       |                                              |                   | p2r (RESTRICTIVE):                        +
-                    |          |       |                                              |                   |   (u): ((cid <> 44) AND (cid < 50))       +
-                    |          |       |                                              |                   |   to: regress_rls_dave                    +
-                    |          |       |                                              |                   | p1r (RESTRICTIVE):                        +
-                    |          |       |                                              |                   |   (u): (cid <> 44)                        +
-                    |          |       |                                              |                   |   to: regress_rls_dave
- regress_rls_schema | uaccount | table | regress_rls_alice=arwdDxtm/regress_rls_alice+|                   | 
-                    |          |       | =r/regress_rls_alice                         |                   | 
-(3 rows)
+                                                                       Access privileges
+       Schema       |   Name   |      Type      |              Access privileges               | Column privileges |                  Policies                  
+--------------------+----------+----------------+----------------------------------------------+-------------------+--------------------------------------------
+ regress_rls_schema | acc_cat  | property graph | regress_rls_alice=arwdDxtm/regress_rls_alice+|                   | 
+                    |          |                | =arwdDxtm/regress_rls_alice                  |                   | 
+ regress_rls_schema | category | table          | regress_rls_alice=arwdDxtm/regress_rls_alice+|                   | 
+                    |          |                | =arwdDxtm/regress_rls_alice                  |                   | 
+ regress_rls_schema | document | table          | regress_rls_alice=arwdDxtm/regress_rls_alice+|                   | p1:                                       +
+                    |          |                | =arwdDxtm/regress_rls_alice                  |                   |   (u): (dlevel <= ( SELECT uaccount.seclv +
+                    |          |                |                                              |                   |    FROM uaccount                          +
+                    |          |                |                                              |                   |   WHERE (uaccount.pguser = CURRENT_USER)))+
+                    |          |                |                                              |                   | p2r (RESTRICTIVE):                        +
+                    |          |                |                                              |                   |   (u): ((cid <> 44) AND (cid < 50))       +
+                    |          |                |                                              |                   |   to: regress_rls_dave                    +
+                    |          |                |                                              |                   | p1r (RESTRICTIVE):                        +
+                    |          |                |                                              |                   |   (u): (cid <> 44)                        +
+                    |          |                |                                              |                   |   to: regress_rls_dave
+ regress_rls_schema | uaccount | table          | regress_rls_alice=arwdDxtm/regress_rls_alice+|                   | 
+                    |          |                | =r/regress_rls_alice                         |                   | 
+(4 rows)
 
 \d document
         Table "regress_rls_schema.document"
@@ -180,6 +189,23 @@ NOTICE:  f_leak => awesome science fiction
   22 |   9 |      1 | regress_rls_dave  | awesome science fiction | science fiction
 (5 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great manga
+NOTICE:  f_leak => awesome science fiction
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   4 |      1 | my first manga          |  44 | manga
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   8 |      1 | great manga             |  44 | manga
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+(5 rows)
+
 -- try a sampled version
 SELECT * FROM document TABLESAMPLE BERNOULLI(50) REPEATABLE(0)
   WHERE f_leak(dtitle) ORDER BY did;
@@ -247,6 +273,33 @@ NOTICE:  f_leak => awesome technology book
   33 |  10 |      2 | regress_rls_dave  | awesome technology book | technology
 (10 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => my second manga
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => great manga
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => awesome technology book
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   2 |      2 | my second novel         |  11 | novel
+ regress_rls_bob   |   3 |      2 | my science fiction      |  22 | science fiction
+ regress_rls_bob   |   4 |      1 | my first manga          |  44 | manga
+ regress_rls_bob   |   5 |      2 | my second manga         |  44 | manga
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book   |  33 | technology
+ regress_rls_carol |   8 |      1 | great manga             |  44 | manga
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+ regress_rls_dave  |  10 |      2 | awesome technology book |  33 | technology
+(10 rows)
+
 -- try a sampled version
 SELECT * FROM document TABLESAMPLE BERNOULLI(50) REPEATABLE(0)
   WHERE f_leak(dtitle) ORDER BY did;
@@ -288,6 +341,28 @@ EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dt
                Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
 (9 rows)
 
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Sort
+   Sort Key: document.did
+   InitPlan 1
+     ->  Index Scan using uaccount_pkey on uaccount uaccount_1
+           Index Cond: (pguser = CURRENT_USER)
+   ->  Hash Join
+         Hash Cond: (document.dauthor = uaccount.pguser)
+         ->  Hash Join
+               Hash Cond: (category.cid = document.cid)
+               ->  Seq Scan on category
+               ->  Hash
+                     ->  Seq Scan on document
+                           Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+         ->  Hash
+               ->  Seq Scan on uaccount
+(15 rows)
+
 -- viewpoint from regress_rls_dave
 SET SESSION AUTHORIZATION regress_rls_dave;
 SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
@@ -328,6 +403,27 @@ NOTICE:  f_leak => awesome technology book
   33 |  10 |      2 | regress_rls_dave  | awesome technology book | technology
 (7 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => awesome technology book
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   2 |      2 | my second novel         |  11 | novel
+ regress_rls_bob   |   3 |      2 | my science fiction      |  22 | science fiction
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book   |  33 | technology
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+ regress_rls_dave  |  10 |      2 | awesome technology book |  33 | technology
+(7 rows)
+
 EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
                                                  QUERY PLAN                                                  
 -------------------------------------------------------------------------------------------------------------
@@ -351,6 +447,28 @@ EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dt
          ->  Seq Scan on document
                Filter: ((cid <> 44) AND (cid <> 44) AND (cid < 50) AND (dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
 (9 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: document.did
+   InitPlan 1
+     ->  Index Scan using uaccount_pkey on uaccount uaccount_1
+           Index Cond: (pguser = CURRENT_USER)
+   ->  Hash Join
+         Hash Cond: (category.cid = document.cid)
+         ->  Seq Scan on category
+         ->  Hash
+               ->  Hash Join
+                     Hash Cond: (uaccount.pguser = document.dauthor)
+                     ->  Seq Scan on uaccount
+                     ->  Hash
+                           ->  Seq Scan on document
+                                 Filter: ((cid <> 44) AND (cid <> 44) AND (cid < 50) AND (dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+(15 rows)
 
 -- 44 would technically fail for both p2r and p1r, but we should get an error
 -- back from p1r for this because it sorts first
@@ -398,6 +516,23 @@ NOTICE:  f_leak => my second manga
   44 |   5 |      2 | regress_rls_bob | my second manga    | manga
 (5 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => my second manga
+     pguser      | did | dlevel |       dtitle       | cid |      cname      
+-----------------+-----+--------+--------------------+-----+-----------------
+ regress_rls_bob |   1 |      1 | my first novel     |  11 | novel
+ regress_rls_bob |   2 |      2 | my second novel    |  11 | novel
+ regress_rls_bob |   3 |      2 | my science fiction |  22 | science fiction
+ regress_rls_bob |   4 |      1 | my first manga     |  44 | manga
+ regress_rls_bob |   5 |      2 | my second manga    |  44 | manga
+(5 rows)
+
 -- viewpoint from rls_regres_carol again
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
@@ -422,6 +557,19 @@ NOTICE:  f_leak => great manga
   44 |   8 |      1 | regress_rls_carol | great manga           | manga
 (3 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => great manga
+      pguser       | did | dlevel |        dtitle         | cid |      cname      
+-------------------+-----+--------+-----------------------+-----+-----------------
+ regress_rls_carol |   6 |      1 | great science fiction |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book |  33 | technology
+ regress_rls_carol |   8 |      1 | great manga           |  44 | manga
+(3 rows)
+
 EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
                        QUERY PLAN                        
 ---------------------------------------------------------
@@ -438,6 +586,23 @@ EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dt
    ->  Index Scan using category_pkey on category
          Index Cond: (cid = document.cid)
 (5 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Sort
+   Sort Key: document.did
+   ->  Nested Loop
+         ->  Nested Loop
+               ->  Index Only Scan using uaccount_pkey on uaccount
+                     Index Cond: (pguser = CURRENT_USER)
+               ->  Seq Scan on document
+                     Filter: ((dauthor = CURRENT_USER) AND f_leak(dtitle))
+         ->  Index Scan using category_pkey on category
+               Index Cond: (cid = document.cid)
+(10 rows)
 
 -- interaction of FK/PK constraints
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -515,6 +680,35 @@ SELECT * FROM category;
   44 | manga
 (4 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => my second manga
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => great manga
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => awesome technology book
+NOTICE:  f_leak => hoge
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   2 |      2 | my second novel         |  11 | novel
+ regress_rls_bob   |   3 |      2 | my science fiction      |  22 | science fiction
+ regress_rls_bob   |   4 |      1 | my first manga          |  44 | manga
+ regress_rls_bob   |   5 |      2 | my second manga         |  44 | manga
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book   |  33 | technology
+ regress_rls_carol |   8 |      1 | great manga             |  44 | manga
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+ regress_rls_dave  |  10 |      2 | awesome technology book |  33 | technology
+ regress_rls_carol |  11 |      1 | hoge                    |  33 | technology
+(11 rows)
+
 -- database superuser does bypass RLS policy when disabled
 RESET SESSION AUTHORIZATION;
 SET row_security TO OFF;
@@ -542,6 +736,35 @@ SELECT * FROM category;
   33 | technology
   44 | manga
 (4 rows)
+
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => my second manga
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => great manga
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => awesome technology book
+NOTICE:  f_leak => hoge
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   2 |      2 | my second novel         |  11 | novel
+ regress_rls_bob   |   3 |      2 | my science fiction      |  22 | science fiction
+ regress_rls_bob   |   4 |      1 | my first manga          |  44 | manga
+ regress_rls_bob   |   5 |      2 | my second manga         |  44 | manga
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book   |  33 | technology
+ regress_rls_carol |   8 |      1 | great manga             |  44 | manga
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+ regress_rls_dave  |  10 |      2 | awesome technology book |  33 | technology
+ regress_rls_carol |  11 |      1 | hoge                    |  33 | technology
+(11 rows)
 
 -- database non-superuser with bypass privilege can bypass RLS policy when disabled
 SET SESSION AUTHORIZATION regress_rls_exempt_user;
@@ -571,6 +794,35 @@ SELECT * FROM category;
   44 | manga
 (4 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => my second manga
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => great manga
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => awesome technology book
+NOTICE:  f_leak => hoge
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   2 |      2 | my second novel         |  11 | novel
+ regress_rls_bob   |   3 |      2 | my science fiction      |  22 | science fiction
+ regress_rls_bob   |   4 |      1 | my first manga          |  44 | manga
+ regress_rls_bob   |   5 |      2 | my second manga         |  44 | manga
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book   |  33 | technology
+ regress_rls_carol |   8 |      1 | great manga             |  44 | manga
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+ regress_rls_dave  |  10 |      2 | awesome technology book |  33 | technology
+ regress_rls_carol |  11 |      1 | hoge                    |  33 | technology
+(11 rows)
+
 -- RLS policy does not apply to table owner when RLS enabled.
 SET SESSION AUTHORIZATION regress_rls_alice;
 SET row_security TO ON;
@@ -598,6 +850,35 @@ SELECT * FROM category;
   33 | technology
   44 | manga
 (4 rows)
+
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => my second manga
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => great manga
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => awesome technology book
+NOTICE:  f_leak => hoge
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   2 |      2 | my second novel         |  11 | novel
+ regress_rls_bob   |   3 |      2 | my science fiction      |  22 | science fiction
+ regress_rls_bob   |   4 |      1 | my first manga          |  44 | manga
+ regress_rls_bob   |   5 |      2 | my second manga         |  44 | manga
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book   |  33 | technology
+ regress_rls_carol |   8 |      1 | great manga             |  44 | manga
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+ regress_rls_dave  |  10 |      2 | awesome technology book |  33 | technology
+ regress_rls_carol |  11 |      1 | hoge                    |  33 | technology
+(11 rows)
 
 -- RLS policy does not apply to table owner when RLS disabled.
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -627,6 +908,35 @@ SELECT * FROM category;
   44 | manga
 (4 rows)
 
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my science fiction
+NOTICE:  f_leak => my first manga
+NOTICE:  f_leak => my second manga
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => great manga
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => awesome technology book
+NOTICE:  f_leak => hoge
+      pguser       | did | dlevel |         dtitle          | cid |      cname      
+-------------------+-----+--------+-------------------------+-----+-----------------
+ regress_rls_bob   |   1 |      1 | my first novel          |  11 | novel
+ regress_rls_bob   |   2 |      2 | my second novel         |  11 | novel
+ regress_rls_bob   |   3 |      2 | my science fiction      |  22 | science fiction
+ regress_rls_bob   |   4 |      1 | my first manga          |  44 | manga
+ regress_rls_bob   |   5 |      2 | my second manga         |  44 | manga
+ regress_rls_carol |   6 |      1 | great science fiction   |  22 | science fiction
+ regress_rls_carol |   7 |      2 | great technology book   |  33 | technology
+ regress_rls_carol |   8 |      1 | great manga             |  44 | manga
+ regress_rls_dave  |   9 |      1 | awesome science fiction |  22 | science fiction
+ regress_rls_dave  |  10 |      2 | awesome technology book |  33 | technology
+ regress_rls_carol |  11 |      1 | hoge                    |  33 | technology
+(11 rows)
+
 --
 -- Table inheritance and RLS policy
 --
@@ -643,6 +953,12 @@ CREATE TABLE t3 (id int not null primary key, c text, b text, a int);
 ALTER TABLE t3 INHERIT t1;
 GRANT ALL ON t3 TO public;
 COPY t3(id, a,b,c) FROM stdin;
+CREATE PROPERTY GRAPH itpg
+    VERTEX TABLES (
+        t1 KEY(id) DEFAULT LABEL PROPERTIES (id, a, b, tableoid::regclass as tableoid),
+        t2 KEY(id) DEFAULT LABEL PROPERTIES (id, a, b, tableoid::regclass as tableoid),
+        t3 KEY(id) DEFAULT LABEL PROPERTIES (id, a, b, tableoid::regclass as tableoid));
+GRANT ALL ON itpg TO public;
 CREATE POLICY p1 ON t1 FOR ALL TO PUBLIC USING (a % 2 = 0); -- be even number
 CREATE POLICY p2 ON t2 FOR ALL TO PUBLIC USING (a % 2 = 1); -- be odd number
 ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
@@ -670,6 +986,28 @@ EXPLAIN (COSTS OFF) SELECT * FROM t1;
          Filter: ((a % 2) = 0)
 (7 rows)
 
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.id, t.a, t.b));
+ id  | a |  b  
+-----+---+-----
+ 102 | 2 | bbb
+ 104 | 4 | dad
+ 202 | 2 | bcd
+ 204 | 4 | def
+ 302 | 2 | yyy
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.id, t.a, t.b));
+          QUERY PLAN           
+-------------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: ((a % 2) = 0)
+   ->  Seq Scan on t2 t1_2
+         Filter: ((a % 2) = 0)
+   ->  Seq Scan on t3 t1_3
+         Filter: ((a % 2) = 0)
+(7 rows)
+
 SELECT * FROM t1 WHERE f_leak(b);
 NOTICE:  f_leak => bbb
 NOTICE:  f_leak => dad
@@ -686,6 +1024,33 @@ NOTICE:  f_leak => yyy
 (5 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM t1 WHERE f_leak(b);
+                  QUERY PLAN                   
+-----------------------------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: (((a % 2) = 0) AND f_leak(b))
+   ->  Seq Scan on t2 t1_2
+         Filter: (((a % 2) = 0) AND f_leak(b))
+   ->  Seq Scan on t3 t1_3
+         Filter: (((a % 2) = 0) AND f_leak(b))
+(7 rows)
+
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1 WHERE f_leak(t.b)) COLUMNS (t.id, t.a, t.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+NOTICE:  f_leak => bcd
+NOTICE:  f_leak => def
+NOTICE:  f_leak => yyy
+ id  | a |  b  
+-----+---+-----
+ 102 | 2 | bbb
+ 104 | 4 | dad
+ 202 | 2 | bcd
+ 204 | 4 | def
+ 302 | 2 | yyy
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1 WHERE f_leak(t.b)) COLUMNS (t.id, t.a, t.b));
                   QUERY PLAN                   
 -----------------------------------------------
  Append
@@ -815,6 +1180,26 @@ EXPLAIN (COSTS OFF) SELECT a, b, tableoid::regclass FROM t2 UNION ALL SELECT a, 
    ->  Seq Scan on t3
 (4 rows)
 
+-- label disjunction
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t : t2 | t3) COLUMNS (t.a, t.b, t.tableoid));
+ a |  b  | tableoid 
+---+-----+----------
+ 1 | abc | t2
+ 3 | cde | t2
+ 1 | xxx | t3
+ 2 | yyy | t3
+ 3 | zzz | t3
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t : t2 | t3) COLUMNS (t.a, t.b, t.tableoid));
+          QUERY PLAN           
+-------------------------------
+ Append
+   ->  Seq Scan on t2
+         Filter: ((a % 2) = 1)
+   ->  Seq Scan on t3
+(4 rows)
+
 -- superuser is allowed to bypass RLS checks
 RESET SESSION AUTHORIZATION;
 SET row_security TO OFF;
@@ -846,6 +1231,45 @@ NOTICE:  f_leak => zzz
 (11 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM t1 WHERE f_leak(b);
+        QUERY PLAN         
+---------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: f_leak(b)
+   ->  Seq Scan on t2 t1_2
+         Filter: f_leak(b)
+   ->  Seq Scan on t3 t1_3
+         Filter: f_leak(b)
+(7 rows)
+
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1 WHERE f_leak(t.b)) COLUMNS (t.id, t.a, t.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => ccc
+NOTICE:  f_leak => dad
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => bcd
+NOTICE:  f_leak => cde
+NOTICE:  f_leak => def
+NOTICE:  f_leak => xxx
+NOTICE:  f_leak => yyy
+NOTICE:  f_leak => zzz
+ id  | a |  b  
+-----+---+-----
+ 101 | 1 | aba
+ 102 | 2 | bbb
+ 103 | 3 | ccc
+ 104 | 4 | dad
+ 201 | 1 | abc
+ 202 | 2 | bcd
+ 203 | 3 | cde
+ 204 | 4 | def
+ 301 | 1 | xxx
+ 302 | 2 | yyy
+ 303 | 3 | zzz
+(11 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1 WHERE f_leak(t.b)) COLUMNS (t.id, t.a, t.b));
         QUERY PLAN         
 ---------------------------
  Append
@@ -899,6 +1323,45 @@ EXPLAIN (COSTS OFF) SELECT * FROM t1 WHERE f_leak(b);
          Filter: f_leak(b)
 (7 rows)
 
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1 WHERE f_leak(t.b)) COLUMNS (t.id, t.a, t.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => ccc
+NOTICE:  f_leak => dad
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => bcd
+NOTICE:  f_leak => cde
+NOTICE:  f_leak => def
+NOTICE:  f_leak => xxx
+NOTICE:  f_leak => yyy
+NOTICE:  f_leak => zzz
+ id  | a |  b  
+-----+---+-----
+ 101 | 1 | aba
+ 102 | 2 | bbb
+ 103 | 3 | ccc
+ 104 | 4 | dad
+ 201 | 1 | abc
+ 202 | 2 | bcd
+ 203 | 3 | cde
+ 204 | 4 | def
+ 301 | 1 | xxx
+ 302 | 2 | yyy
+ 303 | 3 | zzz
+(11 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1 WHERE f_leak(t.b)) COLUMNS (t.id, t.a, t.b));
+        QUERY PLAN         
+---------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: f_leak(b)
+   ->  Seq Scan on t2 t1_2
+         Filter: f_leak(b)
+   ->  Seq Scan on t3 t1_3
+         Filter: f_leak(b)
+(7 rows)
+
 --
 -- Partitioned Tables
 --
@@ -929,6 +1392,9 @@ INSERT INTO part_document VALUES
     ( 8, 55, 2, 'regress_rls_carol', 'great satire'),
     ( 9, 11, 1, 'regress_rls_dave', 'awesome science fiction'),
     (10, 99, 2, 'regress_rls_dave', 'awesome technology book');
+CREATE PROPERTY GRAPH ptpg
+    VERTEX TABLES (part_document KEY (did), part_document_satire KEY (did));
+GRANT ALL ON ptpg TO public;
 ALTER TABLE part_document ENABLE ROW LEVEL SECURITY;
 -- Create policy on parent
 -- user's security level must be higher than or equal to document's
@@ -1001,6 +1467,36 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
          Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
 (10 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => my first satire
+ did | cid | dlevel |      dauthor      |         dtitle          
+-----+-----+--------+-------------------+-------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle)) ORDER BY did;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Sort
+   Sort Key: part_document.did
+   InitPlan 1
+     ->  Index Scan using uaccount_pkey on uaccount
+           Index Cond: (pguser = CURRENT_USER)
+   ->  Append
+         ->  Seq Scan on part_document_fiction part_document_1
+               Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+         ->  Seq Scan on part_document_satire part_document_2
+               Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+         ->  Seq Scan on part_document_nonfiction part_document_3
+               Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+(12 rows)
+
 -- viewpoint from regress_rls_carol
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM part_document WHERE f_leak(dtitle) ORDER BY did;
@@ -1043,6 +1539,48 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
          Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
 (10 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle)) ORDER BY did;
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => my first satire
+NOTICE:  f_leak => great satire
+NOTICE:  f_leak => my science textbook
+NOTICE:  f_leak => my history book
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => awesome technology book
+ did | cid | dlevel |      dauthor      |         dtitle          
+-----+-----+--------+-------------------+-------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   2 |  11 |      2 | regress_rls_bob   | my second novel
+   3 |  99 |      2 | regress_rls_bob   | my science textbook
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   5 |  99 |      2 | regress_rls_bob   | my history book
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   7 |  99 |      2 | regress_rls_carol | great technology book
+   8 |  55 |      2 | regress_rls_carol | great satire
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+  10 |  99 |      2 | regress_rls_dave  | awesome technology book
+(10 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle)) ORDER BY did;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Sort
+   Sort Key: part_document.did
+   InitPlan 1
+     ->  Index Scan using uaccount_pkey on uaccount
+           Index Cond: (pguser = CURRENT_USER)
+   ->  Append
+         ->  Seq Scan on part_document_fiction part_document_1
+               Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+         ->  Seq Scan on part_document_satire part_document_2
+               Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+         ->  Seq Scan on part_document_nonfiction part_document_3
+               Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+(12 rows)
+
 -- viewpoint from regress_rls_dave
 SET SESSION AUTHORIZATION regress_rls_dave;
 SELECT * FROM part_document WHERE f_leak(dtitle) ORDER BY did;
@@ -1059,6 +1597,29 @@ NOTICE:  f_leak => awesome science fiction
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Seq Scan on part_document_fiction part_document
+   Filter: ((cid < 55) AND (dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+   InitPlan 1
+     ->  Index Scan using uaccount_pkey on uaccount
+           Index Cond: (pguser = CURRENT_USER)
+(5 rows)
+
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => awesome science fiction
+ did | cid | dlevel |      dauthor      |         dtitle          
+-----+-----+--------+-------------------+-------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   2 |  11 |      2 | regress_rls_bob   | my second novel
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
                                  QUERY PLAN                                  
 -----------------------------------------------------------------------------
  Seq Scan on part_document_fiction part_document
@@ -1106,6 +1667,17 @@ NOTICE:  f_leak => testing RLS with partitions
  100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
 (3 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document_satire WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+NOTICE:  f_leak => my first satire
+NOTICE:  f_leak => great satire
+NOTICE:  f_leak => testing RLS with partitions
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+(3 rows)
+
 -- Turn on RLS and create policy on child to show RLS is checked before constraints
 SET SESSION AUTHORIZATION regress_rls_alice;
 ALTER TABLE part_document_satire ENABLE ROW LEVEL SECURITY;
@@ -1117,6 +1689,11 @@ INSERT INTO part_document_satire VALUES (101, 55, 1, 'regress_rls_dave', 'testin
 ERROR:  new row violates row-level security policy for table "part_document_satire"
 -- And now we cannot see directly into the partition either, due to RLS
 SELECT * FROM part_document_satire WHERE f_leak(dtitle) ORDER BY did;
+ did | cid | dlevel | dauthor | dtitle 
+-----+-----+--------+---------+--------
+(0 rows)
+
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document_satire WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
  did | cid | dlevel | dauthor | dtitle 
 -----+-----+--------+---------+--------
 (0 rows)
@@ -1137,6 +1714,29 @@ NOTICE:  f_leak => awesome science fiction
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Seq Scan on part_document_fiction part_document
+   Filter: ((cid < 55) AND (dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+   InitPlan 1
+     ->  Index Scan using uaccount_pkey on uaccount
+           Index Cond: (pguser = CURRENT_USER)
+(5 rows)
+
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => awesome science fiction
+ did | cid | dlevel |      dauthor      |         dtitle          
+-----+-----+--------+-------------------+-------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   2 |  11 |      2 | regress_rls_bob   | my second novel
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
                                  QUERY PLAN                                  
 -----------------------------------------------------------------------------
  Seq Scan on part_document_fiction part_document
@@ -1190,6 +1790,48 @@ EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
          Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
 (10 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => awesome science fiction
+NOTICE:  f_leak => my first satire
+NOTICE:  f_leak => great satire
+NOTICE:  f_leak => testing RLS with partitions
+NOTICE:  f_leak => my science textbook
+NOTICE:  f_leak => my history book
+NOTICE:  f_leak => great technology book
+NOTICE:  f_leak => awesome technology book
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   2 |  11 |      2 | regress_rls_bob   | my second novel
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+   3 |  99 |      2 | regress_rls_bob   | my science textbook
+   5 |  99 |      2 | regress_rls_bob   | my history book
+   7 |  99 |      2 | regress_rls_carol | great technology book
+  10 |  99 |      2 | regress_rls_dave  | awesome technology book
+(11 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Append
+   InitPlan 1
+     ->  Index Scan using uaccount_pkey on uaccount
+           Index Cond: (pguser = CURRENT_USER)
+   ->  Seq Scan on part_document_fiction part_document_1
+         Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+   ->  Seq Scan on part_document_satire part_document_2
+         Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+   ->  Seq Scan on part_document_nonfiction part_document_3
+         Filter: ((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle))
+(10 rows)
+
 -- only owner can change policies
 ALTER POLICY pp1 ON part_document USING (true);    --fail
 ERROR:  must be owner of table part_document
@@ -1214,6 +1856,21 @@ NOTICE:  f_leak => my history book
    5 |  99 |      2 | regress_rls_bob | my history book
 (5 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+NOTICE:  f_leak => my first novel
+NOTICE:  f_leak => my second novel
+NOTICE:  f_leak => my first satire
+NOTICE:  f_leak => my science textbook
+NOTICE:  f_leak => my history book
+ did | cid | dlevel |     dauthor     |       dtitle        
+-----+-----+--------+-----------------+---------------------
+   1 |  11 |      1 | regress_rls_bob | my first novel
+   2 |  11 |      2 | regress_rls_bob | my second novel
+   4 |  55 |      1 | regress_rls_bob | my first satire
+   3 |  99 |      2 | regress_rls_bob | my science textbook
+   5 |  99 |      2 | regress_rls_bob | my history book
+(5 rows)
+
 -- viewpoint from rls_regres_carol again
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM part_document WHERE f_leak(dtitle) ORDER BY did;
@@ -1228,6 +1885,29 @@ NOTICE:  f_leak => great technology book
 (3 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM part_document WHERE f_leak(dtitle);
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Append
+   ->  Seq Scan on part_document_fiction part_document_1
+         Filter: ((dauthor = CURRENT_USER) AND f_leak(dtitle))
+   ->  Seq Scan on part_document_satire part_document_2
+         Filter: ((dauthor = CURRENT_USER) AND f_leak(dtitle))
+   ->  Seq Scan on part_document_nonfiction part_document_3
+         Filter: ((dauthor = CURRENT_USER) AND f_leak(dtitle))
+(7 rows)
+
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+NOTICE:  f_leak => great science fiction
+NOTICE:  f_leak => great satire
+NOTICE:  f_leak => great technology book
+ did | cid | dlevel |      dauthor      |        dtitle         
+-----+-----+--------+-------------------+-----------------------
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   8 |  55 |      2 | regress_rls_carol | great satire
+   7 |  99 |      2 | regress_rls_carol | great technology book
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document WHERE f_leak(d.dtitle)) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Append
@@ -1258,7 +1938,31 @@ SELECT * FROM part_document ORDER BY did;
  100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
 (11 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   2 |  11 |      2 | regress_rls_bob   | my second novel
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+   3 |  99 |      2 | regress_rls_bob   | my science textbook
+   5 |  99 |      2 | regress_rls_bob   | my history book
+   7 |  99 |      2 | regress_rls_carol | great technology book
+  10 |  99 |      2 | regress_rls_dave  | awesome technology book
+(11 rows)
+
 SELECT * FROM part_document_satire ORDER by did;
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+(3 rows)
+
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document_satire) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
  did | cid | dlevel |      dauthor      |           dtitle            
 -----+-----+--------+-------------------+-----------------------------
    4 |  55 |      1 | regress_rls_bob   | my first satire
@@ -1285,7 +1989,31 @@ SELECT * FROM part_document ORDER BY did;
  100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
 (11 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   2 |  11 |      2 | regress_rls_bob   | my second novel
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+   3 |  99 |      2 | regress_rls_bob   | my science textbook
+   5 |  99 |      2 | regress_rls_bob   | my history book
+   7 |  99 |      2 | regress_rls_carol | great technology book
+  10 |  99 |      2 | regress_rls_dave  | awesome technology book
+(11 rows)
+
 SELECT * FROM part_document_satire ORDER by did;
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+(3 rows)
+
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document_satire) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
  did | cid | dlevel |      dauthor      |           dtitle            
 -----+-----+--------+-------------------+-----------------------------
    4 |  55 |      1 | regress_rls_bob   | my first satire
@@ -1312,7 +2040,31 @@ SELECT * FROM part_document ORDER by did;
  100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
 (11 rows)
 
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   1 |  11 |      1 | regress_rls_bob   | my first novel
+   2 |  11 |      2 | regress_rls_bob   | my second novel
+   6 |  11 |      1 | regress_rls_carol | great science fiction
+   9 |  11 |      1 | regress_rls_dave  | awesome science fiction
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+   3 |  99 |      2 | regress_rls_bob   | my science textbook
+   5 |  99 |      2 | regress_rls_bob   | my history book
+   7 |  99 |      2 | regress_rls_carol | great technology book
+  10 |  99 |      2 | regress_rls_dave  | awesome technology book
+(11 rows)
+
 SELECT * FROM part_document_satire ORDER by did;
+ did | cid | dlevel |      dauthor      |           dtitle            
+-----+-----+--------+-------------------+-----------------------------
+   4 |  55 |      1 | regress_rls_bob   | my first satire
+   8 |  55 |      2 | regress_rls_carol | great satire
+ 100 |  55 |      1 | regress_rls_dave  | testing RLS with partitions
+(3 rows)
+
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document_satire) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
  did | cid | dlevel |      dauthor      |           dtitle            
 -----+-----+--------+-------------------+-----------------------------
    4 |  55 |      1 | regress_rls_bob   | my first satire
@@ -1325,7 +2077,11 @@ SET SESSION AUTHORIZATION regress_rls_dave;
 SET row_security TO OFF;
 SELECT * FROM part_document ORDER by did;
 ERROR:  query would be affected by row-level security policy for table "part_document"
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
+ERROR:  query would be affected by row-level security policy for table "part_document"
 SELECT * FROM part_document_satire ORDER by did;
+ERROR:  query would be affected by row-level security policy for table "part_document_satire"
+SELECT * FROM GRAPH_TABLE (ptpg MATCH (d : part_document_satire) COLUMNS (d.did, d.cid, d.dlevel, d.dauthor, d.dtitle));
 ERROR:  query would be affected by row-level security policy for table "part_document_satire"
 -- Check behavior with a policy that uses a SubPlan not an InitPlan.
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -1362,9 +2118,12 @@ EXPLAIN (COSTS OFF) SELECT * FROM dependent; -- After drop, should be unqualifie
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE TABLE rec1 (x integer, y integer);
 CREATE POLICY r1 ON rec1 USING (x = (SELECT r.x FROM rec1 r WHERE y = r.y));
+CREATE PROPERTY GRAPH rtpg VERTEX TABLES (rec1 KEY (x));
 ALTER TABLE rec1 ENABLE ROW LEVEL SECURITY;
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM rec1; -- fail, direct recursion
+ERROR:  infinite recursion detected in policy for relation "rec1"
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, direct recursion
 ERROR:  infinite recursion detected in policy for relation "rec1"
 --
 -- Mutual recursion
@@ -1377,6 +2136,8 @@ ALTER TABLE rec2 ENABLE ROW LEVEL SECURITY;
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM rec1;    -- fail, mutual recursion
 ERROR:  infinite recursion detected in policy for relation "rec1"
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, mutual recursion
+ERROR:  infinite recursion detected in policy for relation "rec1"
 --
 -- Mutual recursion via views
 --
@@ -1388,6 +2149,8 @@ ALTER POLICY r1 ON rec1 USING (x = (SELECT a FROM rec2v WHERE b = y));
 ALTER POLICY r2 ON rec2 USING (a = (SELECT x FROM rec1v WHERE y = b));
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM rec1;    -- fail, mutual recursion via views
+ERROR:  infinite recursion detected in policy for relation "rec1"
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, mutual recursion via views
 ERROR:  infinite recursion detected in policy for relation "rec1"
 --
 -- Mutual recursion via .s.b views
@@ -1405,6 +2168,27 @@ CREATE POLICY r2 ON rec2 USING (a = (SELECT x FROM rec1v WHERE y = b));
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM rec1;    -- fail, mutual recursion via s.b. views
 ERROR:  infinite recursion detected in policy for relation "rec1"
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, mutual recursion via s.b. views
+ERROR:  infinite recursion detected in policy for relation "rec1"
+--
+-- Direct and mutual recursion via GRAPH_TABLE
+--
+SET SESSION AUTHORIZATION regress_rls_alice;
+ALTER POLICY r1 ON rec1 USING (x = (SELECT x FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)) WHERE x = y));
+SET SESSION AUTHORIZATION regress_rls_bob;
+SELECT * FROM rec1;    -- fail, direct recursion via GRAPH_TABLE
+ERROR:  infinite recursion detected in policy for relation "rec1"
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, direct recursion via GRAPH_TABLE
+ERROR:  infinite recursion detected in policy for relation "rec1"
+SET SESSION AUTHORIZATION regress_rls_alice;
+ALTER PROPERTY GRAPH rtpg ADD VERTEX TABLES (rec2 KEY (a));
+ALTER POLICY r1 ON rec1 USING (x = (SELECT a FROM GRAPH_TABLE (rtpg MATCH (r: rec2) COLUMNS (r.a, r.b)) WHERE b = y));
+ALTER POLICY r2 ON rec2 USING (a = (SELECT x FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y))WHERE y = b));
+SET SESSION AUTHORIZATION regress_rls_bob;
+SELECT * FROM rec1;    -- fail, mutual recursion via GRAPH_TABLE
+ERROR:  infinite recursion detected in policy for relation "rec1"
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, mutual recursion via GRAPH_TABLE
+ERROR:  infinite recursion detected in policy for relation "rec1"
 --
 -- recursive RLS and VIEWs in policy
 --
@@ -1413,7 +2197,9 @@ CREATE TABLE s1 (a int, b text);
 INSERT INTO s1 (SELECT x, public.fipshash(x::text) FROM generate_series(-10,10) x);
 CREATE TABLE s2 (x int, y text);
 INSERT INTO s2 (SELECT x, public.fipshash(x::text) FROM generate_series(-6,6) x);
+CREATE PROPERTY GRAPH rvtpg VERTEX TABLES (s1 KEY (a));
 GRANT SELECT ON s1, s2 TO regress_rls_bob;
+GRANT SELECT ON rvtpg TO regress_rls_bob;
 CREATE POLICY p1 ON s1 USING (a in (select x from s2 where y like '%2f%'));
 CREATE POLICY p2 ON s2 USING (x in (select a from s1 where b like '%22%'));
 CREATE POLICY p3 ON s1 FOR INSERT WITH CHECK (a = (SELECT a FROM s1));
@@ -1422,6 +2208,8 @@ ALTER TABLE s2 ENABLE ROW LEVEL SECURITY;
 SET SESSION AUTHORIZATION regress_rls_bob;
 CREATE VIEW v2 AS SELECT * FROM s2 WHERE y like '%af%';
 SELECT * FROM s1 WHERE f_leak(b); -- fail (infinite recursion)
+ERROR:  infinite recursion detected in policy for relation "s1"
+SELECT * FROM GRAPH_TABLE (rvtpg MATCH (s : s1) WHERE f_leak(s.b) COLUMNS (s.a, s.b)); -- fail (infinite recursion)
 ERROR:  infinite recursion detected in policy for relation "s1"
 INSERT INTO s1 VALUES (1, 'foo'); -- fail (infinite recursion)
 ERROR:  infinite recursion detected in policy for relation "s1"
@@ -1446,6 +2234,23 @@ EXPLAIN (COSTS OFF) SELECT * FROM only s1 WHERE f_leak(b);
            Filter: (((x % 2) = 0) AND (y ~~ '%2f%'::text))
 (5 rows)
 
+SELECT * FROM GRAPH_TABLE (rvtpg MATCH (s : s1) WHERE f_leak(s.b) COLUMNS (s.a, s.b));
+NOTICE:  f_leak => 03b26944890929ff751653acb2f2af79
+ a  |                b                 
+----+----------------------------------
+ -6 | 03b26944890929ff751653acb2f2af79
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (rvtpg MATCH (s : s1) WHERE f_leak(s.b) COLUMNS (s.a, s.b));
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Seq Scan on s1
+   Filter: ((ANY (a = (hashed SubPlan 1).col1)) AND f_leak(b))
+   SubPlan 1
+     ->  Seq Scan on s2
+           Filter: (((x % 2) = 0) AND (y ~~ '%2f%'::text))
+(5 rows)
+
 SET SESSION AUTHORIZATION regress_rls_alice;
 ALTER POLICY p1 ON s1 USING (a in (select x from v2)); -- using VIEW in RLS policy
 SET SESSION AUTHORIZATION regress_rls_bob;
@@ -1457,6 +2262,23 @@ NOTICE:  f_leak => 03b26944890929ff751653acb2f2af79
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT * FROM s1 WHERE f_leak(b);
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Seq Scan on s1
+   Filter: ((ANY (a = (hashed SubPlan 1).col1)) AND f_leak(b))
+   SubPlan 1
+     ->  Seq Scan on s2
+           Filter: (((x % 2) = 0) AND (y ~~ '%af%'::text))
+(5 rows)
+
+SELECT * FROM GRAPH_TABLE (rvtpg MATCH (s : s1) WHERE f_leak(s.b) COLUMNS (s.a, s.b));
+NOTICE:  f_leak => 03b26944890929ff751653acb2f2af79
+ a  |                b                 
+----+----------------------------------
+ -6 | 03b26944890929ff751653acb2f2af79
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (rvtpg MATCH (s : s1) WHERE f_leak(s.b) COLUMNS (s.a, s.b));
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Seq Scan on s1
@@ -1491,6 +2313,8 @@ ALTER POLICY p2 ON s2 USING (x in (select a from s1 where b like '%d2%'));
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM s1 WHERE f_leak(b);	-- fail (infinite recursion via view)
 ERROR:  infinite recursion detected in policy for relation "s1"
+SELECT * FROM GRAPH_TABLE (rvtpg MATCH (s : s1) WHERE f_leak(s.b) COLUMNS (s.a, s.b));	-- fail (infinite recursion via view)
+ERROR:  infinite recursion detected in policy for relation "s1"
 -- prepared statement with regress_rls_alice privilege
 PREPARE p1(int) AS SELECT * FROM t1 WHERE a <= $1;
 EXECUTE p1(2);
@@ -1502,6 +2326,27 @@ EXECUTE p1(2);
 (3 rows)
 
 EXPLAIN (COSTS OFF) EXECUTE p1(2);
+                  QUERY PLAN                  
+----------------------------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: ((a <= 2) AND ((a % 2) = 0))
+   ->  Seq Scan on t2 t1_2
+         Filter: ((a <= 2) AND ((a % 2) = 0))
+   ->  Seq Scan on t3 t1_3
+         Filter: ((a <= 2) AND ((a % 2) = 0))
+(7 rows)
+
+PREPARE ppg1(int) AS SELECT * FROM GRAPH_TABLE (itpg MATCH (t : t1) WHERE t.a <= $1 COLUMNS (t.id, t.a, t.b));
+EXECUTE ppg1(2);
+ id  | a |  b  
+-----+---+-----
+ 102 | 2 | bbb
+ 202 | 2 | bcd
+ 302 | 2 | yyy
+(3 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE ppg1(2);
                   QUERY PLAN                  
 ----------------------------------------------
  Append
@@ -1579,6 +2424,29 @@ EXPLAIN (COSTS OFF) EXECUTE p1(2);
          Filter: (a <= 2)
 (7 rows)
 
+EXECUTE ppg1(2);
+ id  | a |  b  
+-----+---+-----
+ 101 | 1 | aba
+ 102 | 2 | bbb
+ 201 | 1 | abc
+ 202 | 2 | bcd
+ 301 | 1 | xxx
+ 302 | 2 | yyy
+(6 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE ppg1(2);
+        QUERY PLAN         
+---------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: (a <= 2)
+   ->  Seq Scan on t2 t1_2
+         Filter: (a <= 2)
+   ->  Seq Scan on t3 t1_3
+         Filter: (a <= 2)
+(7 rows)
+
 PREPARE p2(int) AS SELECT * FROM t1 WHERE a = $1;
 EXECUTE p2(2);
  id  | a |  b  
@@ -1589,6 +2457,27 @@ EXECUTE p2(2);
 (3 rows)
 
 EXPLAIN (COSTS OFF) EXECUTE p2(2);
+        QUERY PLAN         
+---------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: (a = 2)
+   ->  Seq Scan on t2 t1_2
+         Filter: (a = 2)
+   ->  Seq Scan on t3 t1_3
+         Filter: (a = 2)
+(7 rows)
+
+PREPARE ppg2(int) AS SELECT * FROM GRAPH_TABLE (itpg MATCH (t : t1) WHERE t.a = $1 COLUMNS (t.id, t.a, t.b));
+EXECUTE ppg2(2);
+ id  | a |  b  
+-----+---+-----
+ 102 | 2 | bbb
+ 202 | 2 | bcd
+ 302 | 2 | yyy
+(3 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE ppg2(2);
         QUERY PLAN         
 ---------------------------
  Append
@@ -1612,6 +2501,26 @@ EXECUTE p2(2);
 (3 rows)
 
 EXPLAIN (COSTS OFF) EXECUTE p2(2);
+                 QUERY PLAN                  
+---------------------------------------------
+ Append
+   ->  Seq Scan on t1 t1_1
+         Filter: ((a = 2) AND ((a % 2) = 0))
+   ->  Seq Scan on t2 t1_2
+         Filter: ((a = 2) AND ((a % 2) = 0))
+   ->  Seq Scan on t3 t1_3
+         Filter: ((a = 2) AND ((a % 2) = 0))
+(7 rows)
+
+EXECUTE ppg2(2);
+ id  | a |  b  
+-----+---+-----
+ 102 | 2 | bbb
+ 202 | 2 | bcd
+ 302 | 2 | yyy
+(3 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE ppg2(2);
                  QUERY PLAN                  
 ---------------------------------------------
  Append
@@ -1903,6 +2812,8 @@ GRANT ALL ON b1 TO regress_rls_bob;
 SET SESSION AUTHORIZATION regress_rls_bob;
 CREATE VIEW bv1 WITH (security_barrier) AS SELECT * FROM b1 WHERE a > 0 WITH CHECK OPTION;
 GRANT ALL ON bv1 TO regress_rls_carol;
+CREATE PROPERTY GRAPH sbvpg VERTEX TABLES (bv1 KEY (a));
+GRANT ALL ON sbvpg TO regress_rls_carol;
 SET SESSION AUTHORIZATION regress_rls_carol;
 EXPLAIN (COSTS OFF) SELECT * FROM bv1 WHERE f_leak(b);
                  QUERY PLAN                  
@@ -1914,6 +2825,30 @@ EXPLAIN (COSTS OFF) SELECT * FROM bv1 WHERE f_leak(b);
 (4 rows)
 
 SELECT * FROM bv1 WHERE f_leak(b);
+NOTICE:  f_leak => d4735e3a265e16eee03f59718b9b5d03
+NOTICE:  f_leak => 4b227777d4dd1fc61c6f884f48641d02
+NOTICE:  f_leak => e7f6c011776e8db7cd330b54174fd76f
+NOTICE:  f_leak => 2c624232cdd221771294dfbb310aca00
+NOTICE:  f_leak => 4a44dc15364204a80fe80e9039455cc1
+ a  |                b                 
+----+----------------------------------
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+(5 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (sbvpg MATCH (b : bv1) WHERE f_leak(b.b) COLUMNS (b.a, b.b));
+                 QUERY PLAN                  
+---------------------------------------------
+ Subquery Scan on bv1
+   Filter: f_leak(bv1.b)
+   ->  Seq Scan on b1
+         Filter: ((a > 0) AND ((a % 2) = 0))
+(4 rows)
+
+SELECT * FROM GRAPH_TABLE (sbvpg MATCH (b : bv1) WHERE f_leak(b.b) COLUMNS (b.a, b.b));
 NOTICE:  f_leak => d4735e3a265e16eee03f59718b9b5d03
 NOTICE:  f_leak => 4b227777d4dd1fc61c6f884f48641d02
 NOTICE:  f_leak => e7f6c011776e8db7cd330b54174fd76f
@@ -2363,7 +3298,8 @@ SELECT * FROM document;
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE TABLE z1 (a int, b text);
 CREATE TABLE z2 (a int, b text);
-GRANT SELECT ON z1,z2 TO regress_rls_group1, regress_rls_group2,
+CREATE PROPERTY GRAPH gtpg VERTEX TABLES (z1 KEY (a), z2 KEY (a));
+GRANT SELECT ON z1,z2, gtpg TO regress_rls_group1, regress_rls_group2,
     regress_rls_bob, regress_rls_carol;
 INSERT INTO z1 VALUES
     (1, 'aba'),
@@ -2390,8 +3326,32 @@ EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
    Filter: (((a % 2) = 0) AND f_leak(b))
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 2 | bbb
+ 4 | dad
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
 PREPARE plancache_test AS SELECT * FROM z1 WHERE f_leak(b);
 EXPLAIN (COSTS OFF) EXECUTE plancache_test;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
+PREPARE plancache_pg_test AS SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test;
                QUERY PLAN                
 -----------------------------------------
  Seq Scan on z1
@@ -2411,8 +3371,34 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
          ->  Seq Scan on z2
 (7 rows)
 
+PREPARE plancache_pg_test2 AS WITH q AS MATERIALIZED (SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS(z.a, z.b))) SELECT * FROM q, GRAPH_TABLE (gtpg MATCH (z : z2) COLUMNS (z.a, z.b));
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test2;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z1
+           Filter: (((a % 2) = 0) AND f_leak(b))
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z2
+(7 rows)
+
 PREPARE plancache_test3 AS WITH q AS MATERIALIZED (SELECT * FROM z2) SELECT * FROM q,z1 WHERE f_leak(z1.b);
 EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z2
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z1
+               Filter: (((a % 2) = 0) AND f_leak(b))
+(7 rows)
+
+PREPARE plancache_pg_test3 AS WITH q AS MATERIALIZED (SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z2) COLUMNS(z.a, z.b))) SELECT * FROM q, GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test3;
                      QUERY PLAN                      
 -----------------------------------------------------
  Nested Loop
@@ -2441,6 +3427,22 @@ EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
    Filter: (((a % 2) = 0) AND f_leak(b))
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 2 | bbb
+ 4 | dad
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
 EXPLAIN (COSTS OFF) EXECUTE plancache_test;
                QUERY PLAN                
 -----------------------------------------
@@ -2472,6 +3474,37 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
                Filter: (((a % 2) = 0) AND f_leak(b))
 (7 rows)
 
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test2;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z1
+           Filter: (((a % 2) = 0) AND f_leak(b))
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z2
+(7 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test3;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z2
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z1
+               Filter: (((a % 2) = 0) AND f_leak(b))
+(7 rows)
+
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM z1 WHERE f_leak(b);
 NOTICE:  f_leak => aba
@@ -2483,6 +3516,22 @@ NOTICE:  f_leak => ccc
 (2 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 1) AND f_leak(b))
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => ccc
+ a |  b  
+---+-----
+ 1 | aba
+ 3 | ccc
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
                QUERY PLAN                
 -----------------------------------------
  Seq Scan on z1
@@ -2509,6 +3558,37 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
 (7 rows)
 
 EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z2
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z1
+               Filter: (((a % 2) = 1) AND f_leak(b))
+(7 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 1) AND f_leak(b))
+(2 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test2;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z1
+           Filter: (((a % 2) = 1) AND f_leak(b))
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z2
+(7 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test3;
                      QUERY PLAN                      
 -----------------------------------------------------
  Nested Loop
@@ -2537,6 +3617,22 @@ EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
    Filter: (((a % 2) = 1) AND f_leak(b))
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => ccc
+ a |  b  
+---+-----
+ 1 | aba
+ 3 | ccc
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 1) AND f_leak(b))
+(2 rows)
+
 EXPLAIN (COSTS OFF) EXECUTE plancache_test;
                QUERY PLAN                
 -----------------------------------------
@@ -2568,13 +3664,46 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
                Filter: (((a % 2) = 1) AND f_leak(b))
 (7 rows)
 
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 1) AND f_leak(b))
+(2 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test2;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z1
+           Filter: (((a % 2) = 1) AND f_leak(b))
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z2
+(7 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE plancache_pg_test3;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Nested Loop
+   CTE q
+     ->  Seq Scan on z2
+   ->  CTE Scan on q
+   ->  Materialize
+         ->  Seq Scan on z1
+               Filter: (((a % 2) = 1) AND f_leak(b))
+(7 rows)
+
 --
 -- Views should follow policy for view owner.
 --
 -- View and Table owner are the same.
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE VIEW rls_view AS SELECT * FROM z1 WHERE f_leak(b);
+CREATE PROPERTY GRAPH vtpg VERTEX TABLES (rls_view KEY (a));
 GRANT SELECT ON rls_view TO regress_rls_bob;
+GRANT SELECT ON vtpg TO regress_rls_bob;
 -- Query as role that is not owner of view or table.  Should return all records.
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM rls_view;
@@ -2591,6 +3720,26 @@ NOTICE:  f_leak => dad
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+     QUERY PLAN      
+---------------------
+ Seq Scan on z1
+   Filter: f_leak(b)
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => ccc
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 1 | aba
+ 2 | bbb
+ 3 | ccc
+ 4 | dad
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
      QUERY PLAN      
 ---------------------
  Seq Scan on z1
@@ -2619,11 +3768,34 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
    Filter: f_leak(b)
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => ccc
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 1 | aba
+ 2 | bbb
+ 3 | ccc
+ 4 | dad
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+     QUERY PLAN      
+---------------------
+ Seq Scan on z1
+   Filter: f_leak(b)
+(2 rows)
+
+DROP PROPERTY GRAPH vtpg;
 DROP VIEW rls_view;
 -- View and Table owners are different.
 SET SESSION AUTHORIZATION regress_rls_bob;
 CREATE VIEW rls_view AS SELECT * FROM z1 WHERE f_leak(b);
 GRANT SELECT ON rls_view TO regress_rls_alice;
+CREATE PROPERTY GRAPH vtpg VERTEX TABLES (rls_view KEY (a));
+GRANT SELECT ON vtpg TO regress_rls_alice;
 -- Query as role that is not owner of view but is owner of table.
 -- Should return records based on view owner policies.
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -2637,6 +3809,22 @@ NOTICE:  f_leak => dad
 (2 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 2 | bbb
+ 4 | dad
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
                QUERY PLAN                
 -----------------------------------------
  Seq Scan on z1
@@ -2662,6 +3850,22 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
    Filter: (((a % 2) = 0) AND f_leak(b))
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 2 | bbb
+ 4 | dad
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
 -- Query as role that is not the owner of the table or view without permissions.
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM rls_view; --fail - permission denied.
@@ -2671,6 +3875,7 @@ ERROR:  permission denied for view rls_view
 -- Query as role that is not the owner of the table or view with permissions.
 SET SESSION AUTHORIZATION regress_rls_bob;
 GRANT SELECT ON rls_view TO regress_rls_carol;
+GRANT SELECT ON vtpg TO regress_rls_carol;
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM rls_view;
 NOTICE:  f_leak => bbb
@@ -2682,6 +3887,22 @@ NOTICE:  f_leak => dad
 (2 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 2 | bbb
+ 4 | dad
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
                QUERY PLAN                
 -----------------------------------------
  Seq Scan on z1
@@ -2699,11 +3920,19 @@ SELECT * FROM rls_view; --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view; --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
 -- Query as role that is not the owner of the table or view without permissions.
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM rls_view; --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view; --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 -- Query as role that is not owner of table but is owner of view with permissions.
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -2717,6 +3946,22 @@ NOTICE:  f_leak => bbb
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Seq Scan on z1
+   Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 0) AND f_leak(b))
+   SubPlan 1
+     ->  Seq Scan on z1_blacklist
+(4 rows)
+
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+ a |  b  
+---+-----
+ 2 | bbb
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
                                       QUERY PLAN                                       
 ---------------------------------------------------------------------------------------
  Seq Scan on z1
@@ -2743,10 +3988,27 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
      ->  Seq Scan on z1_blacklist
 (4 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+ a |  b  
+---+-----
+ 2 | bbb
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Seq Scan on z1
+   Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 0) AND f_leak(b))
+   SubPlan 1
+     ->  Seq Scan on z1_blacklist
+(4 rows)
+
 SET SESSION AUTHORIZATION regress_rls_alice;
 REVOKE SELECT ON z1_blacklist FROM regress_rls_bob;
 DROP POLICY p3 ON z1;
 SET SESSION AUTHORIZATION regress_rls_bob;
+DROP PROPERTY GRAPH vtpg;
 DROP VIEW rls_view;
 --
 -- Security invoker views should follow policy for current user.
@@ -2755,8 +4017,11 @@ DROP VIEW rls_view;
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE VIEW rls_view WITH (security_invoker) AS
     SELECT * FROM z1 WHERE f_leak(b);
+CREATE PROPERTY GRAPH vtpg VERTEX TABLES (rls_view KEY (a));
 GRANT SELECT ON rls_view TO regress_rls_bob;
 GRANT SELECT ON rls_view TO regress_rls_carol;
+GRANT SELECT ON vtpg TO regress_rls_bob;
+GRANT SELECT ON vtpg TO regress_rls_carol;
 -- Query as table owner.  Should return all records.
 SELECT * FROM rls_view;
 NOTICE:  f_leak => aba
@@ -2778,6 +4043,26 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
    Filter: f_leak(b)
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => ccc
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 1 | aba
+ 2 | bbb
+ 3 | ccc
+ 4 | dad
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+     QUERY PLAN      
+---------------------
+ Seq Scan on z1
+   Filter: f_leak(b)
+(2 rows)
+
 -- Queries as other users.
 -- Should return records based on current user's policies.
 SET SESSION AUTHORIZATION regress_rls_bob;
@@ -2791,6 +4076,22 @@ NOTICE:  f_leak => dad
 (2 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 2 | bbb
+ 4 | dad
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
                QUERY PLAN                
 -----------------------------------------
  Seq Scan on z1
@@ -2814,14 +4115,34 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
    Filter: (((a % 2) = 1) AND f_leak(b))
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => ccc
+ a |  b  
+---+-----
+ 1 | aba
+ 3 | ccc
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 1) AND f_leak(b))
+(2 rows)
+
 -- View and table owners are different.
 SET SESSION AUTHORIZATION regress_rls_alice;
+DROP PROPERTY GRAPH vtpg;
 DROP VIEW rls_view;
 SET SESSION AUTHORIZATION regress_rls_bob;
 CREATE VIEW rls_view WITH (security_invoker) AS
     SELECT * FROM z1 WHERE f_leak(b);
+CREATE PROPERTY GRAPH vtpg VERTEX TABLES (rls_view KEY (a));
 GRANT SELECT ON rls_view TO regress_rls_alice;
 GRANT SELECT ON rls_view TO regress_rls_carol;
+GRANT SELECT ON vtpg TO regress_rls_alice;
+GRANT SELECT ON vtpg TO regress_rls_carol;
 -- Query as table owner.  Should return all records.
 SET SESSION AUTHORIZATION regress_rls_alice;
 SELECT * FROM rls_view;
@@ -2838,6 +4159,26 @@ NOTICE:  f_leak => dad
 (4 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+     QUERY PLAN      
+---------------------
+ Seq Scan on z1
+   Filter: f_leak(b)
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => ccc
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 1 | aba
+ 2 | bbb
+ 3 | ccc
+ 4 | dad
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
      QUERY PLAN      
 ---------------------
  Seq Scan on z1
@@ -2863,6 +4204,22 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
    Filter: (((a % 2) = 0) AND f_leak(b))
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+NOTICE:  f_leak => dad
+ a |  b  
+---+-----
+ 2 | bbb
+ 4 | dad
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 0) AND f_leak(b))
+(2 rows)
+
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM rls_view;
 NOTICE:  f_leak => aba
@@ -2874,6 +4231,22 @@ NOTICE:  f_leak => ccc
 (2 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
+               QUERY PLAN                
+-----------------------------------------
+ Seq Scan on z1
+   Filter: (((a % 2) = 1) AND f_leak(b))
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => aba
+NOTICE:  f_leak => ccc
+ a |  b  
+---+-----
+ 1 | aba
+ 3 | ccc
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
                QUERY PLAN                
 -----------------------------------------
  Seq Scan on z1
@@ -2889,11 +4262,19 @@ SELECT * FROM rls_view; --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view; --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
 -- Query as role that is not the owner of the table or view without permissions.
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM rls_view; --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view; --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 -- Query as role that is not owner of table but is owner of view with permissions.
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -2915,11 +4296,31 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
      ->  Seq Scan on z1_blacklist
 (4 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => bbb
+ a |  b  
+---+-----
+ 2 | bbb
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Seq Scan on z1
+   Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 0) AND f_leak(b))
+   SubPlan 1
+     ->  Seq Scan on z1_blacklist
+(4 rows)
+
 -- Query as role that is not the owner of the table or view without permissions.
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM rls_view; --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 EXPLAIN (COSTS OFF) SELECT * FROM rls_view; --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
+ERROR:  permission denied for table z1_blacklist
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b)); --fail - permission denied.
 ERROR:  permission denied for table z1_blacklist
 -- Query as role that is not the owner of the table or view with permissions.
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -2941,14 +4342,33 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_view;
      ->  Seq Scan on z1_blacklist
 (4 rows)
 
+SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+NOTICE:  f_leak => aba
+ a |  b  
+---+-----
+ 1 | aba
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (vtpg MATCH (r: rls_view) COLUMNS (r.a, r.b));
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Seq Scan on z1
+   Filter: ((NOT (ANY (a = (hashed SubPlan 1).col1))) AND ((a % 2) = 1) AND f_leak(b))
+   SubPlan 1
+     ->  Seq Scan on z1_blacklist
+(4 rows)
+
 SET SESSION AUTHORIZATION regress_rls_bob;
+DROP PROPERTY GRAPH vtpg;
 DROP VIEW rls_view;
 --
 -- Command specific
 --
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE TABLE x1 (a int, b text, c text);
+CREATE PROPERTY GRAPH cstpg VERTEX TABLES (x1 KEY (a));
 GRANT ALL ON x1 TO PUBLIC;
+GRANT ALL ON cstpg TO PUBLIC;
 INSERT INTO x1 VALUES
     (1, 'abc', 'regress_rls_bob'),
     (2, 'bcd', 'regress_rls_bob'),
@@ -2966,6 +4386,23 @@ CREATE POLICY p4 ON x1 FOR DELETE USING (a < 8);
 ALTER TABLE x1 ENABLE ROW LEVEL SECURITY;
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM x1 WHERE f_leak(b) ORDER BY a ASC;
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => bcd
+NOTICE:  f_leak => def
+NOTICE:  f_leak => efg
+NOTICE:  f_leak => fgh
+NOTICE:  f_leak => fgh
+ a |  b  |         c         
+---+-----+-------------------
+ 1 | abc | regress_rls_bob
+ 2 | bcd | regress_rls_bob
+ 4 | def | regress_rls_carol
+ 5 | efg | regress_rls_bob
+ 6 | fgh | regress_rls_bob
+ 8 | fgh | regress_rls_carol
+(6 rows)
+
+SELECT * FROM GRAPH_TABLE (cstpg MATCH (x : x1) WHERE f_leak(x.b) COLUMNS (x.a, x.b, x.c)) ORDER BY a ASC;
 NOTICE:  f_leak => abc
 NOTICE:  f_leak => bcd
 NOTICE:  f_leak => def
@@ -3001,6 +4438,23 @@ NOTICE:  f_leak => fgh
 
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM x1 WHERE f_leak(b) ORDER BY a ASC;
+NOTICE:  f_leak => cde
+NOTICE:  f_leak => fgh
+NOTICE:  f_leak => bcd_updt
+NOTICE:  f_leak => def_updt
+NOTICE:  f_leak => fgh_updt
+NOTICE:  f_leak => fgh_updt
+ a |    b     |         c         
+---+----------+-------------------
+ 2 | bcd_updt | regress_rls_bob
+ 3 | cde      | regress_rls_carol
+ 4 | def_updt | regress_rls_carol
+ 6 | fgh_updt | regress_rls_bob
+ 7 | fgh      | regress_rls_carol
+ 8 | fgh_updt | regress_rls_carol
+(6 rows)
+
+SELECT * FROM GRAPH_TABLE (cstpg MATCH (x : x1) WHERE f_leak(x.b) COLUMNS (x.a, x.b, x.c)) ORDER BY a ASC;
 NOTICE:  f_leak => cde
 NOTICE:  f_leak => fgh
 NOTICE:  f_leak => bcd_updt
@@ -3057,7 +4511,9 @@ NOTICE:  f_leak => fgh_updt_updt
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE TABLE y1 (a int, b text);
 CREATE TABLE y2 (a int, b text);
+CREATE PROPERTY GRAPH svbtpg VERTEX TABLES (y1 KEY (a), y2 KEY (a));
 GRANT ALL ON y1, y2 TO regress_rls_bob;
+GRANT ALL ON svbtpg TO regress_rls_bob;
 CREATE POLICY p1 ON y1 FOR ALL USING (a % 2 = 0);
 CREATE POLICY p2 ON y1 FOR SELECT USING (a > 2);
 CREATE POLICY p1 ON y1 FOR SELECT USING (a % 2 = 1);  --fail
@@ -3072,6 +4528,7 @@ ALTER TABLE y2 ENABLE ROW LEVEL SECURITY;
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE VIEW rls_sbv WITH (security_barrier) AS
     SELECT * FROM y1 WHERE f_leak(b);
+ALTER PROPERTY GRAPH svbtpg ADD VERTEX TABLES (rls_sbv KEY (a));
 EXPLAIN (COSTS OFF) SELECT * FROM rls_sbv WHERE (a = 1);
             QUERY PLAN             
 -----------------------------------
@@ -3079,6 +4536,14 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_sbv WHERE (a = 1);
    Filter: (f_leak(b) AND (a = 1))
 (2 rows)
 
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (svbtpg MATCH (r: rls_sbv) WHERE r.a = 1 COLUMNS (r.a, r.b));
+            QUERY PLAN             
+-----------------------------------
+ Seq Scan on y1
+   Filter: (f_leak(b) AND (a = 1))
+(2 rows)
+
+ALTER PROPERTY GRAPH svbtpg DROP VERTEX TABLES (rls_sbv);
 DROP VIEW rls_sbv;
 -- Create view as role that does not own table.  RLS should be applied.
 SET SESSION AUTHORIZATION regress_rls_bob;
@@ -3140,6 +4605,46 @@ EXPLAIN (COSTS OFF) SELECT * FROM y2 WHERE f_leak(b);
    Filter: ((((a % 4) = 0) OR ((a % 3) = 0) OR ((a % 2) = 0)) AND f_leak(b))
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (svbtpg MATCH (y: y2) WHERE f_leak(y.b) COLUMNS (y.a, y.b));
+NOTICE:  f_leak => 5feceb66ffc86f38d952786c6d696c79
+NOTICE:  f_leak => d4735e3a265e16eee03f59718b9b5d03
+NOTICE:  f_leak => 4e07408562bedb8b60ce05c1decfe3ad
+NOTICE:  f_leak => 4b227777d4dd1fc61c6f884f48641d02
+NOTICE:  f_leak => e7f6c011776e8db7cd330b54174fd76f
+NOTICE:  f_leak => 2c624232cdd221771294dfbb310aca00
+NOTICE:  f_leak => 19581e27de7ced00ff1ce50b2047e7a5
+NOTICE:  f_leak => 4a44dc15364204a80fe80e9039455cc1
+NOTICE:  f_leak => 6b51d431df5d7f141cbececcf79edf3d
+NOTICE:  f_leak => 8527a891e224136950ff32ca212b45bc
+NOTICE:  f_leak => e629fa6598d732768f7c726b4b621285
+NOTICE:  f_leak => b17ef6d19c7a5b1ee83b907c595526dc
+NOTICE:  f_leak => 4ec9599fc203d176a301536c2e091a19
+NOTICE:  f_leak => f5ca38f748a1d6eaf726b8a42fb575c3
+ a  |                b                 
+----+----------------------------------
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  3 | 4e07408562bedb8b60ce05c1decfe3ad
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+  9 | 19581e27de7ced00ff1ce50b2047e7a5
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 15 | e629fa6598d732768f7c726b4b621285
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+(14 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (svbtpg MATCH (y: y2) WHERE f_leak(y.b) COLUMNS (y.a, y.b));
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Seq Scan on y2
+   Filter: ((((a % 4) = 0) OR ((a % 3) = 0) OR ((a % 2) = 0)) AND f_leak(b))
+(2 rows)
+
 --
 -- Qual push-down of leaky functions, when not referring to table
 --
@@ -3184,6 +4689,53 @@ NOTICE:  f_leak => abc
 (14 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM y2 WHERE f_leak('abc');
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Seq Scan on y2
+   Filter: (f_leak('abc'::text) AND (((a % 4) = 0) OR ((a % 3) = 0) OR ((a % 2) = 0)))
+(2 rows)
+
+SELECT * FROM GRAPH_TABLE (svbtpg MATCH (y: y2) WHERE f_leak('abc') COLUMNS (y.a, y.b));
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+NOTICE:  f_leak => abc
+ a  |                b                 
+----+----------------------------------
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  3 | 4e07408562bedb8b60ce05c1decfe3ad
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+  9 | 19581e27de7ced00ff1ce50b2047e7a5
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 15 | e629fa6598d732768f7c726b4b621285
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+(14 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (svbtpg MATCH (y: y2) WHERE f_leak('abc') COLUMNS (y.a, y.b));
                                       QUERY PLAN                                       
 ---------------------------------------------------------------------------------------
  Seq Scan on y2
@@ -3248,20 +4800,31 @@ DROP TABLE test_qual_pushdown;
 -- Plancache invalidate on user change.
 --
 RESET SESSION AUTHORIZATION;
+DROP PROPERTY GRAPH itpg;
 DROP TABLE t1 CASCADE;
 NOTICE:  drop cascades to 2 other objects
 DETAIL:  drop cascades to table t2
 drop cascades to table t3
 CREATE TABLE t1 (a integer);
 GRANT SELECT ON t1 TO regress_rls_bob, regress_rls_carol;
+CREATE PROPERTY GRAPH itpg VERTEX TABLES (t1 KEY(a));
+GRANT SELECT ON itpg TO regress_rls_bob, regress_rls_carol;
 CREATE POLICY p1 ON t1 TO regress_rls_bob USING ((a % 2) = 0);
 CREATE POLICY p2 ON t1 TO regress_rls_carol USING ((a % 4) = 0);
 ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
 -- Prepare as regress_rls_bob
 SET ROLE regress_rls_bob;
 PREPARE role_inval AS SELECT * FROM t1;
+PREPARE role_inval_pg AS SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a));
 -- Check plan
 EXPLAIN (COSTS OFF) EXECUTE role_inval;
+       QUERY PLAN        
+-------------------------
+ Seq Scan on t1
+   Filter: ((a % 2) = 0)
+(2 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE role_inval_pg;
        QUERY PLAN        
 -------------------------
  Seq Scan on t1
@@ -3278,6 +4841,13 @@ EXPLAIN (COSTS OFF) EXECUTE role_inval;
    Filter: ((a % 4) = 0)
 (2 rows)
 
+EXPLAIN (COSTS OFF) EXECUTE role_inval_pg;
+       QUERY PLAN        
+-------------------------
+ Seq Scan on t1
+   Filter: ((a % 4) = 0)
+(2 rows)
+
 -- Change back to regress_rls_bob
 SET ROLE regress_rls_bob;
 -- Check plan- should be back to original
@@ -3288,15 +4858,25 @@ EXPLAIN (COSTS OFF) EXECUTE role_inval;
    Filter: ((a % 2) = 0)
 (2 rows)
 
+EXPLAIN (COSTS OFF) EXECUTE role_inval_pg;
+       QUERY PLAN        
+-------------------------
+ Seq Scan on t1
+   Filter: ((a % 2) = 0)
+(2 rows)
+
 --
 -- CTE and RLS
 --
 RESET SESSION AUTHORIZATION;
+DROP PROPERTY GRAPH itpg;
 DROP TABLE t1 CASCADE;
 CREATE TABLE t1 (a integer, b text);
+CREATE PROPERTY GRAPH itpg VERTEX TABLES (t1 KEY(a));
 CREATE POLICY p1 ON t1 USING (a % 2 = 0);
 ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
 GRANT ALL ON t1 TO regress_rls_bob;
+GRANT ALL ON itpg TO regress_rls_bob;
 INSERT INTO t1 (SELECT x, public.fipshash(x::text) FROM generate_series(0,20) x);
 SET SESSION AUTHORIZATION regress_rls_bob;
 WITH cte1 AS MATERIALIZED (SELECT * FROM t1 WHERE f_leak(b)) SELECT * FROM cte1;
@@ -3328,6 +4908,43 @@ NOTICE:  f_leak => f5ca38f748a1d6eaf726b8a42fb575c3
 
 EXPLAIN (COSTS OFF)
 WITH cte1 AS MATERIALIZED (SELECT * FROM t1 WHERE f_leak(b)) SELECT * FROM cte1;
+                   QUERY PLAN                    
+-------------------------------------------------
+ CTE Scan on cte1
+   CTE cte1
+     ->  Seq Scan on t1
+           Filter: (((a % 2) = 0) AND f_leak(b))
+(4 rows)
+
+WITH cte1 AS MATERIALIZED (SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) WHERE f_leak(t.b) COLUMNS (t.a, t.b))) SELECT * FROM cte1;
+NOTICE:  f_leak => 5feceb66ffc86f38d952786c6d696c79
+NOTICE:  f_leak => d4735e3a265e16eee03f59718b9b5d03
+NOTICE:  f_leak => 4b227777d4dd1fc61c6f884f48641d02
+NOTICE:  f_leak => e7f6c011776e8db7cd330b54174fd76f
+NOTICE:  f_leak => 2c624232cdd221771294dfbb310aca00
+NOTICE:  f_leak => 4a44dc15364204a80fe80e9039455cc1
+NOTICE:  f_leak => 6b51d431df5d7f141cbececcf79edf3d
+NOTICE:  f_leak => 8527a891e224136950ff32ca212b45bc
+NOTICE:  f_leak => b17ef6d19c7a5b1ee83b907c595526dc
+NOTICE:  f_leak => 4ec9599fc203d176a301536c2e091a19
+NOTICE:  f_leak => f5ca38f748a1d6eaf726b8a42fb575c3
+ a  |                b                 
+----+----------------------------------
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+(11 rows)
+
+EXPLAIN (COSTS OFF)
+WITH cte1 AS MATERIALIZED (SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) WHERE f_leak(t.b) COLUMNS (t.a, t.b))) SELECT * FROM cte1;
                    QUERY PLAN                    
 -------------------------------------------------
  CTE Scan on cte1
@@ -3460,13 +5077,90 @@ SELECT * FROM t4;
  20 | Success
 (12 rows)
 
+DROP TABLE t2, t3, t4;
+CREATE TABLE t2 (a integer, b text);
+INSERT INTO t2 (SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b)));
+EXPLAIN (COSTS OFF) INSERT INTO t2 (SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b)));
+          QUERY PLAN           
+-------------------------------
+ Insert on t2
+   ->  Seq Scan on t1
+         Filter: ((a % 2) = 0)
+(3 rows)
+
+SELECT * FROM t2;
+ a  |                b                 
+----+----------------------------------
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+ 20 | Success
+(12 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM t2;
+   QUERY PLAN   
+----------------
+ Seq Scan on t2
+(1 row)
+
+CREATE TABLE t3 AS SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+SELECT * FROM t3;
+ a  |                b                 
+----+----------------------------------
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+ 20 | Success
+(12 rows)
+
+SELECT * INTO t4 FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+SELECT * FROM t4;
+ a  |                b                 
+----+----------------------------------
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+ 20 | Success
+(12 rows)
+
 --
 -- RLS with JOIN
 --
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE TABLE blog (id integer, author text, post text);
 CREATE TABLE comment (blog_id integer, message text);
+CREATE PROPERTY GRAPH jtpg
+    VERTEX TABLES (blog KEY (id))
+    EDGE TABLES
+    (comment KEY (blog_id)
+     SOURCE KEY (blog_id) REFERENCES blog(id)
+     DESTINATION KEY (blog_id) REFERENCES blog(id));
 GRANT ALL ON blog, comment TO regress_rls_bob;
+GRANT ALL ON jtpg TO regress_rls_bob;
 CREATE POLICY blog_1 ON blog USING (id % 2 = 0);
 ALTER TABLE blog ENABLE ROW LEVEL SECURITY;
 INSERT INTO blog VALUES
@@ -3499,6 +5193,13 @@ SELECT id, author, message FROM comment JOIN blog ON id = blog_id;
   2 | bob    | who did it?
 (2 rows)
 
+SELECT id, author, message FROM GRAPH_TABLE (jtpg MATCH (b: blog)-[c: comment]->(b) COLUMNS (b.id AS id, b.author AS author, c.message AS message));
+ id | author |   message   
+----+--------+-------------
+  4 | alice  | insane!
+  2 | bob    | who did it?
+(2 rows)
+
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE POLICY comment_1 ON comment USING (blog_id < 4);
 ALTER TABLE comment ENABLE ROW LEVEL SECURITY;
@@ -3516,7 +5217,14 @@ SELECT id, author, message FROM comment JOIN blog ON id = blog_id;
   2 | bob    | who did it?
 (1 row)
 
+SELECT id, author, message FROM GRAPH_TABLE (jtpg MATCH (b: blog)-[c: comment]->(b) COLUMNS (b.id AS id, b.author AS author, c.message AS message));
+ id | author |   message   
+----+--------+-------------
+  2 | bob    | who did it?
+(1 row)
+
 SET SESSION AUTHORIZATION regress_rls_alice;
+DROP PROPERTY GRAPH jtpg;
 DROP TABLE blog, comment;
 --
 -- Default Deny Policy
@@ -3524,6 +5232,7 @@ DROP TABLE blog, comment;
 RESET SESSION AUTHORIZATION;
 DROP POLICY p2 ON t1;
 ALTER TABLE t1 OWNER TO regress_rls_alice;
+GRANT SELECT ON itpg TO regress_rls_alice;
 -- Check that default deny does not apply to superuser.
 RESET SESSION AUTHORIZATION;
 SELECT * FROM t1;
@@ -3554,6 +5263,39 @@ SELECT * FROM t1;
 (22 rows)
 
 EXPLAIN (COSTS OFF) SELECT * FROM t1;
+   QUERY PLAN   
+----------------
+ Seq Scan on t1
+(1 row)
+
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+ a  |                b                 
+----+----------------------------------
+  1 | 6b86b273ff34fce19d6b804eff5a3f57
+  3 | 4e07408562bedb8b60ce05c1decfe3ad
+  5 | ef2d127de37b942baad06145e54b0c61
+  7 | 7902699be42c8a8e46fbbb4501726517
+  9 | 19581e27de7ced00ff1ce50b2047e7a5
+ 11 | 4fc82b26aecb47d2868c4efbe3581732
+ 13 | 3fdba35f04dc8c462986c992bcf87554
+ 15 | e629fa6598d732768f7c726b4b621285
+ 17 | 4523540f1504cd17100c4835e85b7eef
+ 19 | 9400f1b21cb527d7fa3d3eabba93557a
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+ 20 | Success
+(22 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
    QUERY PLAN   
 ----------------
  Seq Scan on t1
@@ -3594,6 +5336,39 @@ EXPLAIN (COSTS OFF) SELECT * FROM t1;
  Seq Scan on t1
 (1 row)
 
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+ a  |                b                 
+----+----------------------------------
+  1 | 6b86b273ff34fce19d6b804eff5a3f57
+  3 | 4e07408562bedb8b60ce05c1decfe3ad
+  5 | ef2d127de37b942baad06145e54b0c61
+  7 | 7902699be42c8a8e46fbbb4501726517
+  9 | 19581e27de7ced00ff1ce50b2047e7a5
+ 11 | 4fc82b26aecb47d2868c4efbe3581732
+ 13 | 3fdba35f04dc8c462986c992bcf87554
+ 15 | e629fa6598d732768f7c726b4b621285
+ 17 | 4523540f1504cd17100c4835e85b7eef
+ 19 | 9400f1b21cb527d7fa3d3eabba93557a
+  0 | 5feceb66ffc86f38d952786c6d696c79
+  2 | d4735e3a265e16eee03f59718b9b5d03
+  4 | 4b227777d4dd1fc61c6f884f48641d02
+  6 | e7f6c011776e8db7cd330b54174fd76f
+  8 | 2c624232cdd221771294dfbb310aca00
+ 10 | 4a44dc15364204a80fe80e9039455cc1
+ 12 | 6b51d431df5d7f141cbececcf79edf3d
+ 14 | 8527a891e224136950ff32ca212b45bc
+ 16 | b17ef6d19c7a5b1ee83b907c595526dc
+ 18 | 4ec9599fc203d176a301536c2e091a19
+ 20 | f5ca38f748a1d6eaf726b8a42fb575c3
+ 20 | Success
+(22 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+   QUERY PLAN   
+----------------
+ Seq Scan on t1
+(1 row)
+
 -- Check that default deny applies to non-owner/non-superuser when RLS on.
 SET SESSION AUTHORIZATION regress_rls_bob;
 SET row_security TO ON;
@@ -3609,6 +5384,18 @@ EXPLAIN (COSTS OFF) SELECT * FROM t1;
    One-Time Filter: false
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+ a | b 
+---+---
+(0 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+        QUERY PLAN        
+--------------------------
+ Result
+   One-Time Filter: false
+(2 rows)
+
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM t1;
  a | b 
@@ -3622,6 +5409,18 @@ EXPLAIN (COSTS OFF) SELECT * FROM t1;
    One-Time Filter: false
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+ a | b 
+---+---
+(0 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+        QUERY PLAN        
+--------------------------
+ Result
+   One-Time Filter: false
+(2 rows)
+
 --
 -- COPY TO/FROM
 --
@@ -3629,9 +5428,11 @@ RESET SESSION AUTHORIZATION;
 DROP TABLE copy_t CASCADE;
 ERROR:  table "copy_t" does not exist
 CREATE TABLE copy_t (a integer, b text);
+CREATE PROPERTY GRAPH ctpg VERTEX TABLES (copy_t KEY (a));
 CREATE POLICY p1 ON copy_t USING (a % 2 = 0);
 ALTER TABLE copy_t ENABLE ROW LEVEL SECURITY;
 GRANT ALL ON copy_t TO regress_rls_bob, regress_rls_exempt_user;
+GRANT ALL ON ctpg TO regress_rls_bob, regress_rls_exempt_user;
 INSERT INTO copy_t (SELECT x, public.fipshash(x::text) FROM generate_series(0,10) x);
 -- Check COPY TO as Superuser/owner.
 RESET SESSION AUTHORIZATION;
@@ -3648,8 +5449,32 @@ COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
 8,2c624232cdd221771294dfbb310aca00
 9,19581e27de7ced00ff1ce50b2047e7a5
 10,4a44dc15364204a80fe80e9039455cc1
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
+0,5feceb66ffc86f38d952786c6d696c79
+1,6b86b273ff34fce19d6b804eff5a3f57
+2,d4735e3a265e16eee03f59718b9b5d03
+3,4e07408562bedb8b60ce05c1decfe3ad
+4,4b227777d4dd1fc61c6f884f48641d02
+5,ef2d127de37b942baad06145e54b0c61
+6,e7f6c011776e8db7cd330b54174fd76f
+7,7902699be42c8a8e46fbbb4501726517
+8,2c624232cdd221771294dfbb310aca00
+9,19581e27de7ced00ff1ce50b2047e7a5
+10,4a44dc15364204a80fe80e9039455cc1
 SET row_security TO ON;
 COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
+0,5feceb66ffc86f38d952786c6d696c79
+1,6b86b273ff34fce19d6b804eff5a3f57
+2,d4735e3a265e16eee03f59718b9b5d03
+3,4e07408562bedb8b60ce05c1decfe3ad
+4,4b227777d4dd1fc61c6f884f48641d02
+5,ef2d127de37b942baad06145e54b0c61
+6,e7f6c011776e8db7cd330b54174fd76f
+7,7902699be42c8a8e46fbbb4501726517
+8,2c624232cdd221771294dfbb310aca00
+9,19581e27de7ced00ff1ce50b2047e7a5
+10,4a44dc15364204a80fe80e9039455cc1
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
 0,5feceb66ffc86f38d952786c6d696c79
 1,6b86b273ff34fce19d6b804eff5a3f57
 2,d4735e3a265e16eee03f59718b9b5d03
@@ -3666,8 +5491,17 @@ SET SESSION AUTHORIZATION regress_rls_bob;
 SET row_security TO OFF;
 COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ','; --fail - would be affected by RLS
 ERROR:  query would be affected by row-level security policy for table "copy_t"
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ','; --fail - would be affected by RLS
+ERROR:  query would be affected by row-level security policy for table "copy_t"
 SET row_security TO ON;
 COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ','; --ok
+0,5feceb66ffc86f38d952786c6d696c79
+2,d4735e3a265e16eee03f59718b9b5d03
+4,4b227777d4dd1fc61c6f884f48641d02
+6,e7f6c011776e8db7cd330b54174fd76f
+8,2c624232cdd221771294dfbb310aca00
+10,4a44dc15364204a80fe80e9039455cc1
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
 0,5feceb66ffc86f38d952786c6d696c79
 2,d4735e3a265e16eee03f59718b9b5d03
 4,4b227777d4dd1fc61c6f884f48641d02
@@ -3689,8 +5523,32 @@ COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ','; --ok
 8,2c624232cdd221771294dfbb310aca00
 9,19581e27de7ced00ff1ce50b2047e7a5
 10,4a44dc15364204a80fe80e9039455cc1
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
+0,5feceb66ffc86f38d952786c6d696c79
+1,6b86b273ff34fce19d6b804eff5a3f57
+2,d4735e3a265e16eee03f59718b9b5d03
+3,4e07408562bedb8b60ce05c1decfe3ad
+4,4b227777d4dd1fc61c6f884f48641d02
+5,ef2d127de37b942baad06145e54b0c61
+6,e7f6c011776e8db7cd330b54174fd76f
+7,7902699be42c8a8e46fbbb4501726517
+8,2c624232cdd221771294dfbb310aca00
+9,19581e27de7ced00ff1ce50b2047e7a5
+10,4a44dc15364204a80fe80e9039455cc1
 SET row_security TO ON;
 COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ','; --ok
+0,5feceb66ffc86f38d952786c6d696c79
+1,6b86b273ff34fce19d6b804eff5a3f57
+2,d4735e3a265e16eee03f59718b9b5d03
+3,4e07408562bedb8b60ce05c1decfe3ad
+4,4b227777d4dd1fc61c6f884f48641d02
+5,ef2d127de37b942baad06145e54b0c61
+6,e7f6c011776e8db7cd330b54174fd76f
+7,7902699be42c8a8e46fbbb4501726517
+8,2c624232cdd221771294dfbb310aca00
+9,19581e27de7ced00ff1ce50b2047e7a5
+10,4a44dc15364204a80fe80e9039455cc1
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
 0,5feceb66ffc86f38d952786c6d696c79
 1,6b86b273ff34fce19d6b804eff5a3f57
 2,d4735e3a265e16eee03f59718b9b5d03
@@ -3707,9 +5565,13 @@ SET SESSION AUTHORIZATION regress_rls_carol;
 SET row_security TO OFF;
 COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ','; --fail - would be affected by RLS
 ERROR:  query would be affected by row-level security policy for table "copy_t"
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
+ERROR:  query would be affected by row-level security policy for table "copy_t"
 SET row_security TO ON;
 COPY (SELECT * FROM copy_t ORDER BY a ASC) TO STDOUT WITH DELIMITER ','; --fail - permission denied
 ERROR:  permission denied for table copy_t
+COPY (SELECT * FROM GRAPH_TABLE (ctpg MATCH (c: copy_t) COLUMNS (c.a, c.b)) ORDER BY a ASC) TO STDOUT WITH DELIMITER ',';
+ERROR:  permission denied for property graph ctpg
 -- Check COPY relation TO; keep it just one row to avoid reordering issues
 RESET SESSION AUTHORIZATION;
 SET row_security TO ON;
@@ -3813,6 +5675,7 @@ SET row_security TO ON;
 COPY copy_t FROM STDIN; --fail - permission denied.
 ERROR:  permission denied for table copy_t
 RESET SESSION AUTHORIZATION;
+DROP PROPERTY GRAPH ctpg;
 DROP TABLE copy_t;
 DROP TABLE copy_rel_to CASCADE;
 NOTICE:  drop cascades to table copy_rel_to_child
@@ -4005,9 +5868,11 @@ SELECT attname, most_common_vals FROM pg_stats
 --
 BEGIN;
 CREATE TABLE coll_t (c) AS VALUES ('bar'::text);
+CREATE PROPERTY GRAPH cltpg VERTEX TABLES (coll_t KEY (c));
 CREATE POLICY coll_p ON coll_t USING (c < ('foo'::text COLLATE "C"));
 ALTER TABLE coll_t ENABLE ROW LEVEL SECURITY;
 GRANT SELECT ON coll_t TO regress_rls_alice;
+GRANT SELECT ON cltpg TO regress_rls_alice;
 SELECT (string_to_array(polqual, ':'))[7] AS inputcollid FROM pg_policy WHERE polrelid = 'coll_t'::regclass;
    inputcollid    
 ------------------
@@ -4016,6 +5881,12 @@ SELECT (string_to_array(polqual, ':'))[7] AS inputcollid FROM pg_policy WHERE po
 
 SET SESSION AUTHORIZATION regress_rls_alice;
 SELECT * FROM coll_t;
+  c  
+-----
+ bar
+(1 row)
+
+SELECT * FROM GRAPH_TABLE (cltpg MATCH (c: coll_t) COLUMNS (c.c));
   c  
 -----
  bar
@@ -4093,7 +5964,8 @@ CREATE TABLE r1 (a int);
 CREATE TABLE r2 (a int);
 INSERT INTO r1 VALUES (10), (20);
 INSERT INTO r2 VALUES (10), (20);
-GRANT ALL ON r1, r2 TO regress_rls_bob;
+CREATE PROPERTY GRAPH trtpg VERTEX TABLES (r2 KEY (a));
+GRANT ALL ON r1, r2, trtpg TO regress_rls_bob;
 CREATE POLICY p1 ON r1 USING (true);
 ALTER TABLE r1 ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p1 ON r2 FOR SELECT USING (true);
@@ -4165,7 +6037,43 @@ SELECT * FROM r2;
  20
 (2 rows)
 
+INSERT INTO r1 SELECT a FROM GRAPH_TABLE (trtpg MATCH (r: r2) COLUMNS (r.a)) r2 RETURNING *; -- OK
+ a  
+----
+ 10
+ 20
+(2 rows)
+
+UPDATE r1 SET a = r2.a + 2 FROM GRAPH_TABLE (trtpg MATCH (r: r2) COLUMNS (r.a)) r2 WHERE r1.a = r2.a RETURNING *; -- OK
+ a  | a  
+----+----
+ 12 | 10
+ 22 | 20
+(2 rows)
+
+DELETE FROM r1 USING GRAPH_TABLE (trtpg MATCH (r: r2) COLUMNS (r.a)) r2 WHERE r1.a = r2.a + 2 RETURNING *; -- OK
+ a  | a  
+----+----
+ 12 | 10
+ 22 | 20
+(2 rows)
+
+SELECT * FROM r1;
+ a  
+----
+ 11
+ 21
+(2 rows)
+
+SELECT * FROM r2;
+ a  
+----
+ 10
+ 20
+(2 rows)
+
 SET SESSION AUTHORIZATION regress_rls_alice;
+DROP PROPERTY GRAPH trtpg;
 DROP TABLE r1;
 DROP TABLE r2;
 --
@@ -4174,12 +6082,18 @@ DROP TABLE r2;
 SET SESSION AUTHORIZATION regress_rls_alice;
 SET row_security = on;
 CREATE TABLE r1 (a int);
+CREATE PROPERTY GRAPH frlstpg VERTEX TABLES (r1 KEY (a));
 INSERT INTO r1 VALUES (10), (20);
 CREATE POLICY p1 ON r1 USING (false);
 ALTER TABLE r1 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE r1 FORCE ROW LEVEL SECURITY;
 -- No error, but no rows
 TABLE r1;
+ a 
+---
+(0 rows)
+
+SELECT * FROM GRAPH_TABLE (frlstpg MATCH (r: r1) COLUMNS (r.a));
  a 
 ---
 (0 rows)
@@ -4206,12 +6120,16 @@ SET row_security = off;
 TABLE r1;
 ERROR:  query would be affected by row-level security policy for table "r1"
 HINT:  To disable the policy for the table's owner, use ALTER TABLE NO FORCE ROW LEVEL SECURITY.
+SELECT * FROM GRAPH_TABLE (frlstpg MATCH (r: r1) COLUMNS (r.a));
+ERROR:  query would be affected by row-level security policy for table "r1"
+HINT:  To disable the policy for the table's owner, use ALTER TABLE NO FORCE ROW LEVEL SECURITY.
 UPDATE r1 SET a = 1;
 ERROR:  query would be affected by row-level security policy for table "r1"
 HINT:  To disable the policy for the table's owner, use ALTER TABLE NO FORCE ROW LEVEL SECURITY.
 DELETE FROM r1;
 ERROR:  query would be affected by row-level security policy for table "r1"
 HINT:  To disable the policy for the table's owner, use ALTER TABLE NO FORCE ROW LEVEL SECURITY.
+DROP PROPERTY GRAPH frlstpg;
 DROP TABLE r1;
 --
 -- FORCE ROW LEVEL SECURITY does not break RI
@@ -4510,8 +6428,10 @@ DROP TABLE ref_tbl;
 CREATE TABLE rls_tbl (a int);
 INSERT INTO rls_tbl SELECT x/10 FROM generate_series(1, 100) x;
 ANALYZE rls_tbl;
+CREATE PROPERTY GRAPH lotpg VERTEX TABLES (rls_tbl KEY (a));
 ALTER TABLE rls_tbl ENABLE ROW LEVEL SECURITY;
 GRANT SELECT ON rls_tbl TO regress_rls_alice;
+GRANT SELECT ON lotpg TO regress_rls_alice;
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE FUNCTION op_leak(int, int) RETURNS bool
     AS 'BEGIN RAISE NOTICE ''op_leak => %, %'', $1, $2; RETURN $1 < $2; END'
@@ -4530,9 +6450,20 @@ EXPLAIN (COSTS OFF) SELECT * FROM rls_tbl WHERE a <<< 1000 or a <<< 900;
    One-Time Filter: false
 (2 rows)
 
+SELECT * FROM GRAPH_TABLE (lotpg MATCH (r: rls_tbl) WHERE r.a <<< 1000 COLUMNS (r.a));
+ a 
+---
+(0 rows)
+
+SELECT * FROM GRAPH_TABLE (lotpg MATCH (r: rls_tbl WHERE r.a <<< 1000) COLUMNS (r.a));
+ a 
+---
+(0 rows)
+
 DROP OPERATOR <<< (int, int);
 DROP FUNCTION op_leak(int, int);
 RESET SESSION AUTHORIZATION;
+DROP PROPERTY GRAPH lotpg;
 DROP TABLE rls_tbl;
 -- Bug #16006: whole-row Vars in a policy don't play nice with sub-selects
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -4700,29 +6631,38 @@ DROP TABLE rls_t;
 --
 RESET SESSION AUTHORIZATION;
 DROP SCHEMA regress_rls_schema CASCADE;
-NOTICE:  drop cascades to 30 other objects
+NOTICE:  drop cascades to 39 other objects
 DETAIL:  drop cascades to function f_leak(text)
 drop cascades to table uaccount
 drop cascades to table category
 drop cascades to table document
+drop cascades to property graph acc_cat
 drop cascades to table part_document
+drop cascades to property graph ptpg
 drop cascades to table dependent
 drop cascades to table rec1
+drop cascades to property graph rtpg
 drop cascades to table rec2
 drop cascades to view rec1v
 drop cascades to view rec2v
 drop cascades to table s1
 drop cascades to table s2
+drop cascades to property graph rvtpg
 drop cascades to view v2
 drop cascades to table b1
 drop cascades to view bv1
+drop cascades to property graph sbvpg
 drop cascades to table z1
 drop cascades to table z2
+drop cascades to property graph gtpg
 drop cascades to table z1_blacklist
 drop cascades to table x1
+drop cascades to property graph cstpg
 drop cascades to table y1
 drop cascades to table y2
+drop cascades to property graph svbtpg
 drop cascades to table t1
+drop cascades to property graph itpg
 drop cascades to table t2
 drop cascades to table t3
 drop cascades to table t4
