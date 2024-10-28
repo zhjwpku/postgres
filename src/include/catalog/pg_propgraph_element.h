@@ -63,6 +63,11 @@ CATALOG(pg_propgraph_element,8299,PropgraphElementRelationId)
 	int16		pgesrcref[1];
 
 	/*
+	 * for edges: Oids of the equality operators for comparing source keys
+	 */
+	Oid			pgesrceqop[1];
+
+	/*
 	 * for edges: destination vertex key (column numbers in pgerelid relation)
 	 */
 	int16		pgedestkey[1];
@@ -72,6 +77,12 @@ CATALOG(pg_propgraph_element,8299,PropgraphElementRelationId)
 	 * in relation reached via pgedestvertexid)
 	 */
 	int16		pgedestref[1];
+
+	/*
+	 * for edges: Oids of the equality operators for comparing destination
+	 * keys
+	 */
+	Oid			pgedesteqop[1];
 #endif
 } FormData_pg_propgraph_element;
 
