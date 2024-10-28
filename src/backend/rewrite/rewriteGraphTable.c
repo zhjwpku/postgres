@@ -14,6 +14,7 @@
 #include "postgres.h"
 
 #include "access/table.h"
+#include "catalog/pg_operator.h"
 #include "catalog/pg_propgraph_element.h"
 #include "catalog/pg_propgraph_element_label.h"
 #include "catalog/pg_propgraph_label.h"
@@ -23,7 +24,10 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "parser/analyze.h"
+#include "parser/parse_collate.h"
+#include "parser/parse_func.h"
 #include "parser/parse_node.h"
+#include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "parser/parse_relation.h"
@@ -83,7 +87,7 @@ struct path_element
 };
 
 static Node *replace_property_refs(Oid propgraphid, Node *node, const List *mappings);
-static List *build_edge_vertex_link_quals(HeapTuple edgetup, int edgerti, int refrti, AttrNumber catalog_key_attnum, AttrNumber catalog_ref_attnum);
+static List *build_edge_vertex_link_quals(HeapTuple edgetup, int edgerti, int refrti, Oid refid, AttrNumber catalog_key_attnum, AttrNumber catalog_ref_attnum, AttrNumber catalog_eqop_attnum);
 static List *generate_queries_for_path_pattern(RangeTblEntry *rte, List *element_patterns);
 static Query *generate_query_for_graph_path(RangeTblEntry *rte, List *path);
 static Node *generate_setop_from_pathqueries(List *pathqueries, List **rtable, List **targetlist);
@@ -373,6 +377,23 @@ generate_queries_for_path_pattern_recurse(RangeTblEntry *rte, List *pathqueries,
 /*
  * Construct a query representing given graph path.
  *
+ * The query contains:
+ *
+ * 1. targetlist corresponding the COLUMNS clause of GRAPH_TABLE clause
+ *
+ * 2. quals corresponding to the WHERE clause of individual elements, WHERE
+ * clause in GRAPH_TABLE clause and quals representing edge-vertex links.
+ *
+ * 3. fromlist containing all elements in the path
+ *
+ * The collations of property expressions are obtained from the catalog and
+ * substituted in place of a property reference. The collations of expressions
+ * in COLUMNS and WHERE clauses are assigned before rewriting the graph table.
+ * The collations of the edge-vertex link quals are assigned when crafting those
+ * quals. Thus everything in the query that requires collation assignment has
+ * been taken care of already. So no collation assignment is required in this
+ * function.
+ *
  * More details in the prologue of generate_queries_for_path_pattern().
  */
 static Query *
@@ -551,6 +572,12 @@ generate_query_for_empty_path_pattern(RangeTblEntry *rte)
 
 /*
  * Construct a query which is UNION of given path queries.
+ *
+ * The UNION query derives collations of its targetlist entries from the
+ * corresponding targetlist entries of the path queries and projects it. The
+ * targetlists of path queries being UNION'ed already have collations assigned.
+ * The same collations are used for targetlist of UNION query. Thus there is no
+ * separate collation assignment required in this function.
  *
  * The function destroys given pathqueries list while constructing
  * SetOperationStmt recrursively. Hence the function always returns with
@@ -747,11 +774,15 @@ create_gpe_for_element(struct path_factor *pf, Oid elemoid)
 		 * each time.
 		 */
 		pe->src_quals = build_edge_vertex_link_quals(eletup, pf->factorpos + 1, pf->src_pf->factorpos + 1,
+													 pe->srcvertexid,
 													 Anum_pg_propgraph_element_pgesrckey,
-													 Anum_pg_propgraph_element_pgesrcref);
+													 Anum_pg_propgraph_element_pgesrcref,
+													 Anum_pg_propgraph_element_pgesrceqop);
 		pe->dest_quals = build_edge_vertex_link_quals(eletup, pf->factorpos + 1, pf->dest_pf->factorpos + 1,
+													  pe->destvertexid,
 													  Anum_pg_propgraph_element_pgedestkey,
-													  Anum_pg_propgraph_element_pgedestref);
+													  Anum_pg_propgraph_element_pgedestref,
+													  Anum_pg_propgraph_element_pgedesteqop);
 	}
 
 	ReleaseSysCache(eletup);
@@ -1122,18 +1153,26 @@ replace_property_refs(Oid propgraphid, Node *node, const List *mappings)
 }
 
 /*
- * Build join qualification expressions between edge and vertex tables.
+ * Build join qualification expressions between edge and vertex tables using
+ * equality operators identified at the time of creating the edge.
  */
 static List *
-build_edge_vertex_link_quals(HeapTuple edgetup, int edgerti, int refrti, AttrNumber catalog_key_attnum, AttrNumber catalog_ref_attnum)
+build_edge_vertex_link_quals(HeapTuple edgetup, int edgerti, int refrti, Oid refid, AttrNumber catalog_key_attnum, AttrNumber catalog_ref_attnum, AttrNumber catalog_eqop_attnum)
 {
 	List	   *quals = NIL;
 	Form_pg_propgraph_element pgeform;
 	Datum		datum;
 	Datum	   *d1,
-			   *d2;
+			   *d2,
+			   *d3;
 	int			n1,
-				n2;
+				n2,
+				n3;
+	ParseState *pstate = make_parsestate(NULL);
+	HeapTuple	reftup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(refid));
+	Oid			refrelid = ((Form_pg_propgraph_element) GETSTRUCT(reftup))->pgerelid;
+
+	ReleaseSysCache(reftup);
 
 	pgeform = (Form_pg_propgraph_element) GETSTRUCT(edgetup);
 
@@ -1143,32 +1182,73 @@ build_edge_vertex_link_quals(HeapTuple edgetup, int edgerti, int refrti, AttrNum
 	datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, edgetup, catalog_ref_attnum);
 	deconstruct_array_builtin(DatumGetArrayTypeP(datum), INT2OID, &d2, NULL, &n2);
 
+	datum = SysCacheGetAttrNotNull(PROPGRAPHELOID, edgetup, catalog_eqop_attnum);
+	deconstruct_array_builtin(DatumGetArrayTypeP(datum), OIDOID, &d3, NULL, &n3);
+
 	if (n1 != n2)
 		elog(ERROR, "array size key (%d) vs ref (%d) mismatch for element ID %u", catalog_key_attnum, catalog_ref_attnum, pgeform->oid);
+	if (n1 != n3)
+		elog(ERROR, "array size key (%d) vs operator (%d) mismatch for element ID %u", catalog_key_attnum, catalog_eqop_attnum, pgeform->oid);
 
 	for (int i = 0; i < n1; i++)
 	{
 		AttrNumber	keyattn = DatumGetInt16(d1[i]);
 		AttrNumber	refattn = DatumGetInt16(d2[i]);
+		Oid			eqop = DatumGetObjectId(d3[i]);
+		Var		   *keyvar;
+		Var		   *refvar;
 		Oid			atttypid;
-		TypeCacheEntry *typentry;
-		OpExpr	   *op;
+		int32		atttypmod;
+		Oid			attcoll;
+		HeapTuple	tup;
+		Form_pg_operator opform;
+		List	   *args;
+		Oid			actual_arg_types[2];
+		Oid			declared_arg_types[2];
+		OpExpr	   *linkqual;
+
+		get_atttypetypmodcoll(pgeform->pgerelid, keyattn, &atttypid, &atttypmod, &attcoll);
+		keyvar = makeVar(edgerti, keyattn, atttypid, atttypmod, attcoll, 0);
+		get_atttypetypmodcoll(refrelid, refattn, &atttypid, &atttypmod, &attcoll);
+		refvar = makeVar(refrti, refattn, atttypid, atttypmod, attcoll, 0);
+
+		tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(eqop));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for operator %u", eqop);
+		opform = (Form_pg_operator) GETSTRUCT(tup);
+		/* An equality operator is a binary operator returning boolean result. */
+		Assert(opform->oprkind == 'b'
+			   && RegProcedureIsValid(opform->oprcode)
+			   && opform->oprresult == BOOLOID
+			   && !get_func_retset(opform->oprcode));
 
 		/*
-		 * TODO: Assumes types the same on both sides; no collations yet. Some
-		 * of this could probably be shared with foreign key triggers.
+		 * Prepare operands and cast them to the types required by the
+		 * equality operator. Similar to PK/FK qauls, referenced vertex key is
+		 * used as left operand and referencing edge key is used as right
+		 * operand.
 		 */
-		atttypid = get_atttype(pgeform->pgerelid, keyattn);
-		typentry = lookup_type_cache(atttypid, TYPECACHE_EQ_OPR);
+		args = list_make2(refvar, keyvar);
+		actual_arg_types[0] = exprType((Node *) refvar);
+		actual_arg_types[1] = exprType((Node *) keyvar);
+		declared_arg_types[0] = opform->oprleft;
+		declared_arg_types[1] = opform->oprright;
+		make_fn_arguments(pstate, args, actual_arg_types, declared_arg_types);
 
-		op = makeNode(OpExpr);
-		op->location = -1;
-		op->opno = typentry->eq_opr;
-		op->opresulttype = BOOLOID;
-		op->args = list_make2(makeVar(edgerti, keyattn, atttypid, -1, 0, 0),
-							  makeVar(refrti, refattn, atttypid, -1, 0, 0));
-		quals = lappend(quals, op);
+		linkqual = makeNode(OpExpr);
+		linkqual->opno = opform->oid;
+		linkqual->opfuncid = opform->oprcode;
+		linkqual->opresulttype = opform->oprresult;
+		linkqual->opretset = false;
+		/* opcollid and inputcollid will be set by parse_collate.c */
+		linkqual->args = args;
+		linkqual->location = -1;
+
+		ReleaseSysCache(tup);
+		quals = lappend(quals, linkqual);
 	}
+
+	assign_expr_collations(pstate, (Node *) quals);
 
 	return quals;
 }
