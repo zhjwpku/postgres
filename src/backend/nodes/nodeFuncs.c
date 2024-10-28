@@ -540,8 +540,7 @@ exprTypmod(const Node *expr)
 		case T_PlaceHolderVar:
 			return exprTypmod((Node *) ((const PlaceHolderVar *) expr)->phexpr);
 		case T_GraphPropertyRef:
-			/* TODO */
-			return -1;
+			return ((const GraphPropertyRef *) expr)->typmod;
 		default:
 			break;
 	}
@@ -1065,7 +1064,7 @@ exprCollation(const Node *expr)
 			coll = exprCollation((Node *) ((const PlaceHolderVar *) expr)->phexpr);
 			break;
 		case T_GraphPropertyRef:
-			coll = DEFAULT_COLLATION_OID;	/* FIXME */
+			coll = ((const GraphPropertyRef *) expr)->collation;
 			break;
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(expr));

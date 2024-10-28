@@ -36,6 +36,12 @@ CATALOG(pg_propgraph_property,8306,PropgraphPropertyRelationId)
 
 	/* data type of the property */
 	Oid			pgptypid BKI_LOOKUP_OPT(pg_type);
+
+	/* typemod of the property */
+	int32		pgptypmod;
+
+	/* collation of the property */
+	Oid			pgpcollation BKI_LOOKUP_OPT(pg_collation);
 } FormData_pg_propgraph_property;
 
 /* ----------------
