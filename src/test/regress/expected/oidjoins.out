@@ -277,3 +277,4 @@ NOTICE:  checking pg_propgraph_label_property {plppropid} => pg_propgraph_proper
 NOTICE:  checking pg_propgraph_label_property {plpellabelid} => pg_propgraph_element_label {oid}
 NOTICE:  checking pg_propgraph_property {pgppgid} => pg_class {oid}
 NOTICE:  checking pg_propgraph_property {pgptypid} => pg_type {oid}
+NOTICE:  checking pg_propgraph_property {pgpcollation} => pg_collation {oid}

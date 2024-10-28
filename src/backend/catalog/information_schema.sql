@@ -3271,9 +3271,9 @@ CREATE VIEW pg_property_data_types AS
            CAST(null AS sql_identifier) AS character_set_catalog,
            CAST(null AS sql_identifier) AS character_set_schema,
            CAST(null AS sql_identifier) AS character_set_name,
-           CAST(null AS sql_identifier) AS collation_catalog, -- FIXME
-           CAST(null AS sql_identifier) AS collation_schema, -- FIXME
-           CAST(null AS sql_identifier) AS collation_name, -- FIXME
+           CAST(current_database() AS sql_identifier) AS collation_catalog,
+           CAST(nc.nspname AS sql_identifier) AS collation_schema,
+           CAST(c.collname AS sql_identifier) AS collation_name,
            CAST(null AS cardinal_number) AS numeric_precision,
            CAST(null AS cardinal_number) AS numeric_precision_radix,
            CAST(null AS cardinal_number) AS numeric_scale,
@@ -3297,6 +3297,8 @@ CREATE VIEW pg_property_data_types AS
          JOIN (pg_type t JOIN pg_namespace nt ON (t.typnamespace = nt.oid)) ON pgp.pgptypid = t.oid
          LEFT JOIN (pg_type bt JOIN pg_namespace nbt ON (bt.typnamespace = nbt.oid))
            ON (t.typtype = 'd' AND t.typbasetype = bt.oid)
+         LEFT JOIN (pg_collation c JOIN pg_namespace nc ON (c.collnamespace = nc.oid))
+           ON pgp.pgpcollation = c.oid AND (nc.nspname, c.collname) <> ('pg_catalog', 'default')
 
     WHERE pg.relkind = 'g'
           AND (NOT pg_is_other_temp_schema(npg.oid))
