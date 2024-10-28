@@ -14,20 +14,27 @@
 
 #include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_collation_d.h"
+#include "catalog/pg_operator_d.h"
 #include "catalog/pg_propgraph_element.h"
 #include "catalog/pg_propgraph_element_label.h"
 #include "catalog/pg_propgraph_label.h"
 #include "catalog/pg_propgraph_label_property.h"
 #include "catalog/pg_propgraph_property.h"
+#include "commands/defrem.h"
 #include "commands/propgraphcmds.h"
 #include "commands/tablecmds.h"
 #include "nodes/nodeFuncs.h"
+#include "parser/parse_coerce.h"
+#include "parser/parse_collate.h"
+#include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "parser/parse_target.h"
 #include "utils/array.h"
@@ -52,12 +59,14 @@ struct element_info
 	Oid			srcrelid;
 	ArrayType  *srckey;
 	ArrayType  *srcref;
+	ArrayType  *srceqop;
 
 	char	   *destvertex;
 	Oid			destvertexid;
 	Oid			destrelid;
 	ArrayType  *destkey;
 	ArrayType  *destref;
+	ArrayType  *desteqop;
 
 	List	   *labels;
 };
@@ -68,8 +77,8 @@ static ArrayType *propgraph_element_get_key(ParseState *pstate, const List *keyc
 static void propgraph_edge_get_ref_keys(ParseState *pstate, const List *keycols, const List *refcols,
 										Relation edge_rel, Relation ref_rel,
 										const char *aliasname, int location, const char *type,
-										ArrayType **outkey, ArrayType **outref);
-static ArrayType *array_from_column_list(ParseState *pstate, const List *colnames, int location, Relation element_rel);
+										ArrayType **outkey, ArrayType **outref, ArrayType **outeqop);
+static AttrNumber *array_from_column_list(ParseState *pstate, const List *colnames, int location, Relation element_rel);
 static ArrayType *array_from_attnums(int numattrs, const AttrNumber *attnums);
 static Oid	insert_element_record(ObjectAddress pgaddress, struct element_info *einfo);
 static Oid	insert_label_record(Oid graphid, Oid peoid, const char *label);
@@ -217,10 +226,10 @@ CreatePropGraph(ParseState *pstate, const CreatePropGraphStmt *stmt)
 
 		propgraph_edge_get_ref_keys(pstate, edge->esrckey, edge->esrcvertexcols, rel, srcrel,
 									einfo->aliasname, edge->location, "SOURCE",
-									&einfo->srckey, &einfo->srcref);
+									&einfo->srckey, &einfo->srcref, &einfo->srceqop);
 		propgraph_edge_get_ref_keys(pstate, edge->edestkey, edge->edestvertexcols, rel, destrel,
 									einfo->aliasname, edge->location, "DESTINATION",
-									&einfo->destkey, &einfo->destref);
+									&einfo->destkey, &einfo->destref, &einfo->desteqop);
 
 		einfo->labels = edge->labels;
 
@@ -336,7 +345,8 @@ propgraph_element_get_key(ParseState *pstate, const List *key_clause, Relation e
 	}
 	else
 	{
-		a = array_from_column_list(pstate, key_clause, location, element_rel);
+		a = array_from_attnums(list_length(key_clause),
+							   array_from_column_list(pstate, key_clause, location, element_rel));
 	}
 
 	return a;
@@ -360,8 +370,15 @@ static void
 propgraph_edge_get_ref_keys(ParseState *pstate, const List *keycols, const List *refcols,
 							Relation edge_rel, Relation ref_rel,
 							const char *aliasname, int location, const char *type,
-							ArrayType **outkey, ArrayType **outref)
+							ArrayType **outkey, ArrayType **outref, ArrayType **outeqop)
 {
+	int			nkeys;
+	AttrNumber *keyattnums;
+	AttrNumber *refattnums;
+	Oid		   *keyeqops;
+	Datum	   *datums;
+	int			i;
+
 	Assert((keycols && refcols) || (!keycols && !refcols));
 
 	if (keycols)
@@ -372,8 +389,89 @@ propgraph_edge_get_ref_keys(ParseState *pstate, const List *keycols, const List 
 					errmsg("mismatching number of columns in %s vertex definition of edge \"%s\"", type, aliasname),
 					parser_errposition(pstate, location));
 
-		*outkey = array_from_column_list(pstate, keycols, location, edge_rel);
-		*outref = array_from_column_list(pstate, refcols, location, ref_rel);
+		nkeys = list_length(keycols);
+		keyattnums = array_from_column_list(pstate, keycols, location, edge_rel);
+		refattnums = array_from_column_list(pstate, refcols, location, ref_rel);
+		keyeqops = palloc_array(Oid, nkeys);
+
+		for (i = 0; i < nkeys; i++)
+		{
+			Oid			keytype;
+			int32		keytypmod;
+			Oid			keycoll;
+			Oid			reftype;
+			int32		reftypmod;
+			Oid			refcoll;
+			Oid			opc;
+			Oid			opf;
+			StrategyNumber strategy;
+
+			/*
+			 * Lookup equality operator to be used for edge and vertex key.
+			 * Vertex key is equivalent to primary key and edge key is similar
+			 * to foreign key since edge key references vertex key. Hence
+			 * vertex key is used as left operand and edge key is used as
+			 * right operand. The method used to find the equality operators
+			 * is similar to the method used to find equality operators for
+			 * FK/PK comparison in ATAddForeignKeyConstraint() except that
+			 * opclass of the the vertex key type is used as a starting point.
+			 * Since we need only equality operators we use both BT and HASH
+			 * strategies.
+			 *
+			 * If the required operators do not exist, we can not construct
+			 * quals linking an edge to its adjacent vertexes.
+			 */
+			get_atttypetypmodcoll(RelationGetRelid(edge_rel), keyattnums[i], &keytype, &keytypmod, &keycoll);
+			get_atttypetypmodcoll(RelationGetRelid(ref_rel), refattnums[i], &reftype, &reftypmod, &refcoll);
+			keyeqops[i] = InvalidOid;
+			strategy = BTEqualStrategyNumber;
+			opc = GetDefaultOpClass(reftype, BTREE_AM_OID);
+			if (!OidIsValid(opc))
+			{
+				opc = GetDefaultOpClass(reftype, HASH_AM_OID);
+				strategy = HTEqualStrategyNumber;
+			}
+			if (OidIsValid(opc))
+			{
+				opf = get_opclass_family(opc);
+				if (OidIsValid(opf))
+				{
+					keyeqops[i] = get_opfamily_member(opf, reftype, keytype, strategy);
+					if (!OidIsValid(keyeqops[i]))
+					{
+						/* Last resort, implicit cast. */
+						if (can_coerce_type(1, &keytype, &reftype, COERCION_IMPLICIT))
+							keyeqops[i] = get_opfamily_member(opf, reftype, reftype, strategy);
+					}
+				}
+			}
+
+			if (!OidIsValid(keyeqops[i]))
+				ereport(ERROR,
+						errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("no equality operator exists for %s key comparison of edge \"%s\"",
+							   type, aliasname),
+						parser_errposition(pstate, location));
+
+			/*
+			 * If collations of key attribute and referenced attribute are
+			 * different, an edge may end up being adjacent to undesired
+			 * vertexes.  Prohibit such a case.
+			 *
+			 * PK/FK allows different collations as long as they are
+			 * deterministic for backward compatibility. But we can be a bit
+			 * stricter here and follow SQL standard.
+			 */
+			if (keycoll != refcoll &&
+				keycoll != DEFAULT_COLLATION_OID && refcoll != DEFAULT_COLLATION_OID &&
+				OidIsValid(keycoll) && OidIsValid(refcoll))
+				ereport(ERROR,
+						errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("collation mismatch in %s key of edge \"%s\": %s vs. %s",
+							   type, aliasname,
+							   get_collation_name(keycoll), get_collation_name(refcoll)),
+						parser_errposition(pstate, location));
+		}
 	}
 	else
 	{
@@ -402,25 +500,34 @@ propgraph_edge_get_ref_keys(ParseState *pstate, const List *keycols, const List 
 
 		Assert(fk);
 
-		*outkey = array_from_attnums(fk->nkeys, fk->conkey);
-		*outref = array_from_attnums(fk->nkeys, fk->confkey);
+		nkeys = fk->nkeys;
+		keyattnums = fk->conkey;
+		refattnums = fk->confkey;
+		keyeqops = fk->conpfeqop;
 	}
+
+	*outkey = array_from_attnums(nkeys, keyattnums);
+	*outref = array_from_attnums(nkeys, refattnums);
+	datums = (Datum *) palloc(sizeof(Datum) * nkeys);
+	for (i = 0; i < nkeys; i++)
+		datums[i] = ObjectIdGetDatum(keyeqops[i]);
+	*outeqop = construct_array_builtin(datums, nkeys, OIDOID);
 }
 
 /*
  * Convert list of column names in the specified relation into an array of
  * column numbers.
  */
-static ArrayType *
+static AttrNumber *
 array_from_column_list(ParseState *pstate, const List *colnames, int location, Relation element_rel)
 {
 	int			numattrs;
-	Datum	   *attnumsd;
+	AttrNumber *attnums;
 	int			i;
 	ListCell   *lc;
 
 	numattrs = list_length(colnames);
-	attnumsd = palloc_array(Datum, numattrs);
+	attnums = palloc_array(AttrNumber, numattrs);
 
 	i = 0;
 	foreach(lc, colnames)
@@ -436,14 +543,14 @@ array_from_column_list(ParseState *pstate, const List *colnames, int location, R
 					 errmsg("column \"%s\" of relation \"%s\" does not exist",
 							colname, get_rel_name(relid)),
 					 parser_errposition(pstate, location)));
-		attnumsd[i++] = Int16GetDatum(attnum);
+		attnums[i++] = attnum;
 	}
 
 	for (int j = 0; j < numattrs; j++)
 	{
 		for (int k = j + 1; k < numattrs; k++)
 		{
-			if (DatumGetInt16(attnumsd[j]) == DatumGetInt16(attnumsd[k]))
+			if (attnums[j] == attnums[k])
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("graph key columns list must not contain duplicates"),
@@ -451,7 +558,7 @@ array_from_column_list(ParseState *pstate, const List *colnames, int location, R
 		}
 	}
 
-	return construct_array_builtin(attnumsd, numattrs, INT2OID);
+	return attnums;
 }
 
 static ArrayType *
@@ -480,6 +587,23 @@ array_of_attnums_to_objectaddrs(Oid relid, ArrayType *arr, ObjectAddresses *addr
 		ObjectAddress referenced;
 
 		ObjectAddressSubSet(referenced, RelationRelationId, relid, DatumGetInt16(attnumsd[i]));
+		add_exact_object_address(&referenced, addrs);
+	}
+}
+
+static void
+array_of_opers_to_objectaddrs(ArrayType *arr, ObjectAddresses *addrs)
+{
+	Datum	   *opersd;
+	int			numopers;
+
+	deconstruct_array_builtin(arr, OIDOID, &opersd, NULL, &numopers);
+
+	for (int i = 0; i < numopers; i++)
+	{
+		ObjectAddress referenced;
+
+		ObjectAddressSet(referenced, OperatorRelationId, DatumGetObjectId(opersd[i]));
 		add_exact_object_address(&referenced, addrs);
 	}
 }
@@ -524,6 +648,10 @@ insert_element_record(ObjectAddress pgaddress, struct element_info *einfo)
 		values[Anum_pg_propgraph_element_pgesrcref - 1] = PointerGetDatum(einfo->srcref);
 	else
 		nulls[Anum_pg_propgraph_element_pgesrcref - 1] = true;
+	if (einfo->srceqop)
+		values[Anum_pg_propgraph_element_pgesrceqop - 1] = PointerGetDatum(einfo->srceqop);
+	else
+		nulls[Anum_pg_propgraph_element_pgesrceqop - 1] = true;
 	if (einfo->destkey)
 		values[Anum_pg_propgraph_element_pgedestkey - 1] = PointerGetDatum(einfo->destkey);
 	else
@@ -532,6 +660,10 @@ insert_element_record(ObjectAddress pgaddress, struct element_info *einfo)
 		values[Anum_pg_propgraph_element_pgedestref - 1] = PointerGetDatum(einfo->destref);
 	else
 		nulls[Anum_pg_propgraph_element_pgedestref - 1] = true;
+	if (einfo->desteqop)
+		values[Anum_pg_propgraph_element_pgedesteqop - 1] = PointerGetDatum(einfo->desteqop);
+	else
+		nulls[Anum_pg_propgraph_element_pgedesteqop - 1] = true;
 
 	tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
 	CatalogTupleInsert(rel, tup);
@@ -549,13 +681,17 @@ insert_element_record(ObjectAddress pgaddress, struct element_info *einfo)
 	add_exact_object_address(&referenced, addrs);
 	array_of_attnums_to_objectaddrs(einfo->relid, einfo->key, addrs);
 
-	/* Add dependencies on vertices */
+	/*
+	 * Add dependencies on vertices and equality operators used for key
+	 * comparison.
+	 */
 	if (einfo->srcvertexid)
 	{
 		ObjectAddressSet(referenced, PropgraphElementRelationId, einfo->srcvertexid);
 		add_exact_object_address(&referenced, addrs);
 		array_of_attnums_to_objectaddrs(einfo->relid, einfo->srckey, addrs);
 		array_of_attnums_to_objectaddrs(einfo->srcrelid, einfo->srcref, addrs);
+		array_of_opers_to_objectaddrs(einfo->srceqop, addrs);
 	}
 	if (einfo->destvertexid)
 	{
@@ -563,9 +699,8 @@ insert_element_record(ObjectAddress pgaddress, struct element_info *einfo)
 		add_exact_object_address(&referenced, addrs);
 		array_of_attnums_to_objectaddrs(einfo->relid, einfo->destkey, addrs);
 		array_of_attnums_to_objectaddrs(einfo->destrelid, einfo->destref, addrs);
+		array_of_opers_to_objectaddrs(einfo->desteqop, addrs);
 	}
-
-	/* TODO: dependencies on equality operators, like for foreign keys */
 
 	record_object_address_dependencies(&myself, addrs, DEPENDENCY_NORMAL);
 
@@ -766,6 +901,7 @@ insert_property_records(Oid graphid, Oid ellabeloid, Oid pgerelid, const PropGra
 	table_close(rel, NoLock);
 
 	tp = transformTargetList(pstate, proplist, EXPR_KIND_PROPGRAPH_PROPERTY);
+	assign_expr_collations(pstate, (Node *) tp);
 
 	foreach(lc, tp)
 	{
@@ -784,9 +920,15 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 {
 	Oid			propoid;
 	Oid			exprtypid;
+	int32		exprtypmod;
+	Oid			exprcollation;
 	Oid			proptypid;
+	int32		proptypmod;
+	Oid			propcollation;
 
 	exprtypid = exprType((const Node *) expr);
+	exprcollation = exprCollation((const Node *) expr);
+	exprtypmod = exprTypmod((const Node *) expr);
 
 	/*
 	 * Insert into pg_propgraph_property if not already existing.
@@ -803,6 +945,8 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 		ObjectAddress referenced;
 
 		proptypid = exprtypid;
+		proptypmod = exprtypmod;
+		propcollation = exprcollation;
 
 		rel = table_open(PropgraphPropertyRelationId, RowExclusiveLock);
 
@@ -812,6 +956,8 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 		namestrcpy(&propnamedata, propname);
 		values[Anum_pg_propgraph_property_pgpname - 1] = NameGetDatum(&propnamedata);
 		values[Anum_pg_propgraph_property_pgptypid - 1] = ObjectIdGetDatum(proptypid);
+		values[Anum_pg_propgraph_property_pgptypmod - 1] = Int32GetDatum(proptypmod);
+		values[Anum_pg_propgraph_property_pgpcollation - 1] = ObjectIdGetDatum(propcollation);
 
 		tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
 		CatalogTupleInsert(rel, tup);
@@ -828,7 +974,13 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 	}
 	else
 	{
-		proptypid = GetSysCacheOid1(PROPGRAPHPROPOID, Anum_pg_propgraph_property_pgptypid, ObjectIdGetDatum(propoid));
+		HeapTuple	pgptup = SearchSysCache1(PROPGRAPHPROPOID, ObjectIdGetDatum(propoid));
+		Form_pg_propgraph_property pgpform = (Form_pg_propgraph_property) GETSTRUCT(pgptup);
+
+		proptypid = pgpform->pgptypid;
+		proptypmod = pgpform->pgptypmod;
+		propcollation = pgpform->pgpcollation;
+		ReleaseSysCache(pgptup);
 	}
 
 	/*
@@ -843,6 +995,32 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 				errmsg("property \"%s\" data type mismatch: %s vs. %s",
 					   propname, format_type_be(proptypid), format_type_be(exprtypid)),
 				errdetail("In a property graph, a property of the same name has to have the same data type in each label."));
+	}
+
+	/* Similarly for collation */
+	if (propcollation != exprcollation)
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_SYNTAX_ERROR),
+				errmsg("property \"%s\" collation mismatch: %s vs. %s",
+					   propname, get_collation_name(propcollation), get_collation_name(exprcollation)),
+				errdetail("In a property graph, a property of the same name has to have the same collation in each label."));
+	}
+
+	/*
+	 * And typmod. It does not seem to be necessary to enforce typmod
+	 * consistency across properties with the same name. But when properties
+	 * with the same name have different typmods, it is not clear which one
+	 * should be used as the typmod of the graph property when typmod of a
+	 * property is requested before fetching any of the property expressions.
+	 */
+	if (proptypmod != exprtypmod)
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_SYNTAX_ERROR),
+				errmsg("property \"%s\" data type modifier mismatch: %d vs. %d",
+					   propname, proptypmod, exprtypmod),
+				errdetail("In a property graph, a property of the same name has to have the same type modifier in each label."));
 	}
 
 	/*
@@ -1236,10 +1414,10 @@ AlterPropGraph(ParseState *pstate, const AlterPropGraphStmt *stmt)
 
 		propgraph_edge_get_ref_keys(pstate, edge->esrckey, edge->esrcvertexcols, rel, srcrel,
 									einfo->aliasname, edge->location, "SOURCE",
-									&einfo->srckey, &einfo->srcref);
+									&einfo->srckey, &einfo->srcref, &einfo->srceqop);
 		propgraph_edge_get_ref_keys(pstate, edge->edestkey, edge->edestvertexcols, rel, destrel,
 									einfo->aliasname, edge->location, "DESTINATION",
-									&einfo->destkey, &einfo->destref);
+									&einfo->destkey, &einfo->destref, &einfo->desteqop);
 
 		einfo->labels = edge->labels;
 
