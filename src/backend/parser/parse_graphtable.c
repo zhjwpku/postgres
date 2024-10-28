@@ -56,18 +56,24 @@ transformGraphTablePropertyRef(ParseState *pstate, ColumnRef *cref)
 		if (list_member(gpstate->variables, field1))
 		{
 			GraphPropertyRef *gpr = makeNode(GraphPropertyRef);
-			Oid			propid;
+			HeapTuple	pgptup;
+			Form_pg_propgraph_property pgpform;
 
-			propid = GetSysCacheOid2(PROPGRAPHPROPNAME, Anum_pg_propgraph_property_oid, ObjectIdGetDatum(gpstate->graphid), CStringGetDatum(propname));
-			if (!propid)
+			pgptup = SearchSysCache2(PROPGRAPHPROPNAME, ObjectIdGetDatum(gpstate->graphid), CStringGetDatum(propname));
+			if (!HeapTupleIsValid(pgptup))
 				ereport(ERROR,
 						errcode(ERRCODE_SYNTAX_ERROR),
 						errmsg("property \"%s\" does not exist", propname));
+			pgpform = (Form_pg_propgraph_property) GETSTRUCT(pgptup);
 
 			gpr->location = cref->location;
 			gpr->elvarname = elvarname;
-			gpr->propid = propid;
-			gpr->typeId = GetSysCacheOid1(PROPGRAPHPROPOID, Anum_pg_propgraph_property_pgptypid, ObjectIdGetDatum(propid));
+			gpr->propid = pgpform->oid;
+			gpr->typeId = pgpform->pgptypid;
+			gpr->typmod = pgpform->pgptypmod;
+			gpr->collation = pgpform->pgpcollation;
+
+			ReleaseSysCache(pgptup);
 
 			return (Node *) gpr;
 		}

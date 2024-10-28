@@ -187,6 +187,94 @@ GRANT SELECT ON PROPERTY GRAPH g1 TO regress_graph_user2;
 GRANT UPDATE ON PROPERTY GRAPH g1 TO regress_graph_user2;  -- fail
 ERROR:  invalid privilege type UPDATE for property graph
 RESET ROLE;
+-- collation
+CREATE TABLE tc1 (a int, b text);
+CREATE TABLE tc2 (a int, b text);
+CREATE TABLE tc3 (a int, b text COLLATE "C");
+CREATE TABLE ec1 (ek1 int, ek2 int, eb text);
+CREATE TABLE ec2 (ek1 int, ek2 int, eb text COLLATE "POSIX");
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a), tc2 KEY (a), tc3 KEY (a)); -- fail
+ERROR:  property "b" collation mismatch: default vs. C
+DETAIL:  In a property graph, a property of the same name has to have the same collation in each label.
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a), tc2 KEY (a))
+    EDGE TABLES (
+        ec1 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a),
+        ec2 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a)); -- fail
+ERROR:  property "eb" collation mismatch: default vs. POSIX
+DETAIL:  In a property graph, a property of the same name has to have the same collation in each label.
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a) DEFAULT LABEL PROPERTIES (a), tc3 KEY (b))
+    EDGE TABLES (
+        ec2 KEY (ek1, eb)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (eb) REFERENCES tc3 (b)); -- fail
+ERROR:  collation mismatch in DESTINATION key of edge "ec2": POSIX vs. C
+LINE 4:         ec2 KEY (ek1, eb)
+                ^
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (tc1 KEY (a), tc2 KEY (a))
+    EDGE TABLES (
+        ec1 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a));
+ALTER PROPERTY GRAPH gc1 ADD VERTEX TABLES (tc3 KEY (a)); -- fail
+ERROR:  property "b" collation mismatch: default vs. C
+DETAIL:  In a property graph, a property of the same name has to have the same collation in each label.
+ALTER PROPERTY GRAPH gc1 ADD EDGE TABLES (
+            ec2 KEY (ek1, ek2)
+                SOURCE KEY (ek1) REFERENCES tc1 (a)
+                DESTINATION KEY (ek2) REFERENCES tc2 (a)); -- fail
+ERROR:  property "eb" collation mismatch: default vs. POSIX
+DETAIL:  In a property graph, a property of the same name has to have the same collation in each label.
+ALTER PROPERTY GRAPH gc1
+    ADD VERTEX TABLES (
+        tc3 KEY (a) DEFAULT LABEL PROPERTIES (a, b COLLATE pg_catalog.DEFAULT AS b));
+ALTER PROPERTY GRAPH gc1 ADD EDGE TABLES (
+            ec2 KEY (ek1, ek2)
+                SOURCE KEY (ek1) REFERENCES tc1 (a)
+                DESTINATION KEY (ek2) REFERENCES tc2 (a)
+                DEFAULT LABEL PROPERTIES (ek1, ek2, eb COLLATE pg_catalog.DEFAULT AS eb));
+DROP PROPERTY GRAPH gc1;
+CREATE PROPERTY GRAPH gc1
+    VERTEX TABLES (
+        tc1 KEY (a) DEFAULT LABEL PROPERTIES (a, b::varchar COLLATE "C" AS b),
+        tc2 KEY (a) DEFAULT LABEL PROPERTIES (a, (b COLLATE "C")::varchar AS b),
+        tc3 KEY (a) DEFAULT LABEL PROPERTIES (a, b::varchar AS b))
+    EDGE TABLES (
+        ec1 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a)
+            DEFAULT LABEL PROPERTIES (ek1, ek2, eb),
+        ec2 KEY (ek1, ek2)
+            SOURCE KEY (ek1) REFERENCES tc1 (a)
+            DESTINATION KEY (ek2) REFERENCES tc2 (a)
+            DEFAULT LABEL PROPERTIES (ek1, ek2, eb COLLATE pg_catalog.DEFAULT AS eb));
+-- type incosistency check
+CREATE TABLE v1 (a int primary key, b text);
+CREATE TABLE e(k1 text, k2 text, c text);
+CREATE TABLE v2 (m text, n text);
+CREATE PROPERTY GRAPH gt
+    VERTEX TABLES (v1 KEY (a), v2 KEY (m))
+    EDGE TABLES (
+        e KEY (k1, k2)
+        SOURCE KEY (k1) REFERENCES v1(a)
+        DESTINATION KEY (k2) REFERENCES v2(m)); -- fail
+ERROR:  no equality operator exists for SOURCE key comparison of edge "e"
+LINE 4:         e KEY (k1, k2)
+                ^
+ALTER TABLE e DROP COLUMN k1, ADD COLUMN k1 bigint primary key;
+CREATE PROPERTY GRAPH gt
+    VERTEX TABLES (v1 KEY (a), v2 KEY (m))
+    EDGE TABLES (
+        e KEY (k1, k2)
+        SOURCE KEY (k1) REFERENCES v1(a)
+        DESTINATION KEY (k2) REFERENCES v2(m));
 -- information schema
 SELECT * FROM information_schema.property_graphs ORDER BY property_graph_name;
  property_graph_catalog |    property_graph_schema    | property_graph_name 
@@ -196,7 +284,9 @@ SELECT * FROM information_schema.property_graphs ORDER BY property_graph_name;
  regression             | create_property_graph_tests | g3
  regression             | create_property_graph_tests | g4
  regression             | create_property_graph_tests | g5
-(5 rows)
+ regression             | create_property_graph_tests | gc1
+ regression             | create_property_graph_tests | gt
+(7 rows)
 
 SELECT * FROM information_schema.pg_element_tables ORDER BY property_graph_name, element_table_alias;
  property_graph_catalog |    property_graph_schema    | property_graph_name | element_table_alias | element_table_kind | table_catalog |        table_schema         | table_name | element_table_definition 
@@ -216,7 +306,15 @@ SELECT * FROM information_schema.pg_element_tables ORDER BY property_graph_name,
  regression             | create_property_graph_tests | g5                  | t11                 | VERTEX             | regression    | create_property_graph_tests | t11        | 
  regression             | create_property_graph_tests | g5                  | t12                 | VERTEX             | regression    | create_property_graph_tests | t12        | 
  regression             | create_property_graph_tests | g5                  | t13                 | EDGE               | regression    | create_property_graph_tests | t13        | 
-(15 rows)
+ regression             | create_property_graph_tests | gc1                 | ec1                 | EDGE               | regression    | create_property_graph_tests | ec1        | 
+ regression             | create_property_graph_tests | gc1                 | ec2                 | EDGE               | regression    | create_property_graph_tests | ec2        | 
+ regression             | create_property_graph_tests | gc1                 | tc1                 | VERTEX             | regression    | create_property_graph_tests | tc1        | 
+ regression             | create_property_graph_tests | gc1                 | tc2                 | VERTEX             | regression    | create_property_graph_tests | tc2        | 
+ regression             | create_property_graph_tests | gc1                 | tc3                 | VERTEX             | regression    | create_property_graph_tests | tc3        | 
+ regression             | create_property_graph_tests | gt                  | e                   | EDGE               | regression    | create_property_graph_tests | e          | 
+ regression             | create_property_graph_tests | gt                  | v1                  | VERTEX             | regression    | create_property_graph_tests | v1         | 
+ regression             | create_property_graph_tests | gt                  | v2                  | VERTEX             | regression    | create_property_graph_tests | v2         | 
+(23 rows)
 
 SELECT * FROM information_schema.pg_element_table_key_columns ORDER BY property_graph_name, element_table_alias, ordinal_position;
  property_graph_catalog |    property_graph_schema    | property_graph_name | element_table_alias | column_name | ordinal_position 
@@ -240,7 +338,18 @@ SELECT * FROM information_schema.pg_element_table_key_columns ORDER BY property_
  regression             | create_property_graph_tests | g5                  | t11                 | a           |                1
  regression             | create_property_graph_tests | g5                  | t12                 | b           |                1
  regression             | create_property_graph_tests | g5                  | t13                 | c           |                1
-(19 rows)
+ regression             | create_property_graph_tests | gc1                 | ec1                 | ek1         |                1
+ regression             | create_property_graph_tests | gc1                 | ec1                 | ek2         |                2
+ regression             | create_property_graph_tests | gc1                 | ec2                 | ek1         |                1
+ regression             | create_property_graph_tests | gc1                 | ec2                 | ek2         |                2
+ regression             | create_property_graph_tests | gc1                 | tc1                 | a           |                1
+ regression             | create_property_graph_tests | gc1                 | tc2                 | a           |                1
+ regression             | create_property_graph_tests | gc1                 | tc3                 | a           |                1
+ regression             | create_property_graph_tests | gt                  | e                   | k1          |                1
+ regression             | create_property_graph_tests | gt                  | e                   | k2          |                2
+ regression             | create_property_graph_tests | gt                  | v1                  | a           |                1
+ regression             | create_property_graph_tests | gt                  | v2                  | m           |                1
+(30 rows)
 
 SELECT * FROM information_schema.pg_edge_table_components ORDER BY property_graph_name, edge_table_alias, edge_end DESC, ordinal_position;
  property_graph_catalog |    property_graph_schema    | property_graph_name | edge_table_alias | vertex_table_alias |  edge_end   | edge_table_column_name | vertex_table_column_name | ordinal_position 
@@ -257,7 +366,13 @@ SELECT * FROM information_schema.pg_edge_table_components ORDER BY property_grap
  regression             | create_property_graph_tests | g4                  | e2               | t3                 | DESTINATION | t                      | y                        |                2
  regression             | create_property_graph_tests | g5                  | t13              | t11                | SOURCE      | d                      | a                        |                1
  regression             | create_property_graph_tests | g5                  | t13              | t12                | DESTINATION | e                      | b                        |                1
-(12 rows)
+ regression             | create_property_graph_tests | gc1                 | ec1              | tc1                | SOURCE      | ek1                    | a                        |                1
+ regression             | create_property_graph_tests | gc1                 | ec1              | tc2                | DESTINATION | ek2                    | a                        |                1
+ regression             | create_property_graph_tests | gc1                 | ec2              | tc1                | SOURCE      | ek1                    | a                        |                1
+ regression             | create_property_graph_tests | gc1                 | ec2              | tc2                | DESTINATION | ek2                    | a                        |                1
+ regression             | create_property_graph_tests | gt                  | e                | v1                 | SOURCE      | k1                     | a                        |                1
+ regression             | create_property_graph_tests | gt                  | e                | v2                 | DESTINATION | k2                     | m                        |                1
+(18 rows)
 
 SELECT * FROM information_schema.pg_element_table_labels ORDER BY property_graph_name, element_table_alias, label_name;
  property_graph_catalog |    property_graph_schema    | property_graph_name | element_table_alias | label_name 
@@ -280,11 +395,19 @@ SELECT * FROM information_schema.pg_element_table_labels ORDER BY property_graph
  regression             | create_property_graph_tests | g5                  | t11                 | t11
  regression             | create_property_graph_tests | g5                  | t12                 | t12
  regression             | create_property_graph_tests | g5                  | t13                 | t13
-(18 rows)
+ regression             | create_property_graph_tests | gc1                 | ec1                 | ec1
+ regression             | create_property_graph_tests | gc1                 | ec2                 | ec2
+ regression             | create_property_graph_tests | gc1                 | tc1                 | tc1
+ regression             | create_property_graph_tests | gc1                 | tc2                 | tc2
+ regression             | create_property_graph_tests | gc1                 | tc3                 | tc3
+ regression             | create_property_graph_tests | gt                  | e                   | e
+ regression             | create_property_graph_tests | gt                  | v1                  | v1
+ regression             | create_property_graph_tests | gt                  | v2                  | v2
+(26 rows)
 
 SELECT * FROM information_schema.pg_element_table_properties ORDER BY property_graph_name, element_table_alias, property_name;
- property_graph_catalog |    property_graph_schema    | property_graph_name | element_table_alias | property_name | property_expression 
-------------------------+-----------------------------+---------------------+---------------------+---------------+---------------------
+ property_graph_catalog |    property_graph_schema    | property_graph_name | element_table_alias | property_name |         property_expression          
+------------------------+-----------------------------+---------------------+---------------------+---------------+--------------------------------------
  regression             | create_property_graph_tests | g2                  | e1                  | a             | a
  regression             | create_property_graph_tests | g2                  | e1                  | i             | i
  regression             | create_property_graph_tests | g2                  | e1                  | t             | t
@@ -320,7 +443,26 @@ SELECT * FROM information_schema.pg_element_table_properties ORDER BY property_g
  regression             | create_property_graph_tests | g5                  | t13                 | c             | c
  regression             | create_property_graph_tests | g5                  | t13                 | d             | d
  regression             | create_property_graph_tests | g5                  | t13                 | e             | e
-(35 rows)
+ regression             | create_property_graph_tests | gc1                 | ec1                 | eb            | eb
+ regression             | create_property_graph_tests | gc1                 | ec1                 | ek1           | ek1
+ regression             | create_property_graph_tests | gc1                 | ec1                 | ek2           | ek2
+ regression             | create_property_graph_tests | gc1                 | ec2                 | eb            | (eb COLLATE "default")
+ regression             | create_property_graph_tests | gc1                 | ec2                 | ek1           | ek1
+ regression             | create_property_graph_tests | gc1                 | ec2                 | ek2           | ek2
+ regression             | create_property_graph_tests | gc1                 | tc1                 | a             | a
+ regression             | create_property_graph_tests | gc1                 | tc1                 | b             | ((b)::character varying COLLATE "C")
+ regression             | create_property_graph_tests | gc1                 | tc2                 | a             | a
+ regression             | create_property_graph_tests | gc1                 | tc2                 | b             | ((b)::character varying COLLATE "C")
+ regression             | create_property_graph_tests | gc1                 | tc3                 | a             | a
+ regression             | create_property_graph_tests | gc1                 | tc3                 | b             | (b)::character varying
+ regression             | create_property_graph_tests | gt                  | e                   | c             | c
+ regression             | create_property_graph_tests | gt                  | e                   | k1            | k1
+ regression             | create_property_graph_tests | gt                  | e                   | k2            | k2
+ regression             | create_property_graph_tests | gt                  | v1                  | a             | a
+ regression             | create_property_graph_tests | gt                  | v1                  | b             | b
+ regression             | create_property_graph_tests | gt                  | v2                  | m             | m
+ regression             | create_property_graph_tests | gt                  | v2                  | n             | n
+(54 rows)
 
 SELECT * FROM information_schema.pg_label_properties ORDER BY property_graph_name, label_name, property_name;
  property_graph_catalog |    property_graph_schema    | property_graph_name | label_name | property_name 
@@ -367,7 +509,26 @@ SELECT * FROM information_schema.pg_label_properties ORDER BY property_graph_nam
  regression             | create_property_graph_tests | g5                  | t13        | c
  regression             | create_property_graph_tests | g5                  | t13        | d
  regression             | create_property_graph_tests | g5                  | t13        | e
-(42 rows)
+ regression             | create_property_graph_tests | gc1                 | ec1        | eb
+ regression             | create_property_graph_tests | gc1                 | ec1        | ek1
+ regression             | create_property_graph_tests | gc1                 | ec1        | ek2
+ regression             | create_property_graph_tests | gc1                 | ec2        | eb
+ regression             | create_property_graph_tests | gc1                 | ec2        | ek1
+ regression             | create_property_graph_tests | gc1                 | ec2        | ek2
+ regression             | create_property_graph_tests | gc1                 | tc1        | a
+ regression             | create_property_graph_tests | gc1                 | tc1        | b
+ regression             | create_property_graph_tests | gc1                 | tc2        | a
+ regression             | create_property_graph_tests | gc1                 | tc2        | b
+ regression             | create_property_graph_tests | gc1                 | tc3        | a
+ regression             | create_property_graph_tests | gc1                 | tc3        | b
+ regression             | create_property_graph_tests | gt                  | e          | c
+ regression             | create_property_graph_tests | gt                  | e          | k1
+ regression             | create_property_graph_tests | gt                  | e          | k2
+ regression             | create_property_graph_tests | gt                  | v1         | a
+ regression             | create_property_graph_tests | gt                  | v1         | b
+ regression             | create_property_graph_tests | gt                  | v2         | m
+ regression             | create_property_graph_tests | gt                  | v2         | n
+(61 rows)
 
 SELECT * FROM information_schema.pg_labels ORDER BY property_graph_name, label_name;
  property_graph_catalog |    property_graph_schema    | property_graph_name | label_name 
@@ -390,39 +551,59 @@ SELECT * FROM information_schema.pg_labels ORDER BY property_graph_name, label_n
  regression             | create_property_graph_tests | g5                  | t11
  regression             | create_property_graph_tests | g5                  | t12
  regression             | create_property_graph_tests | g5                  | t13
-(18 rows)
+ regression             | create_property_graph_tests | gc1                 | ec1
+ regression             | create_property_graph_tests | gc1                 | ec2
+ regression             | create_property_graph_tests | gc1                 | tc1
+ regression             | create_property_graph_tests | gc1                 | tc2
+ regression             | create_property_graph_tests | gc1                 | tc3
+ regression             | create_property_graph_tests | gt                  | e
+ regression             | create_property_graph_tests | gt                  | v1
+ regression             | create_property_graph_tests | gt                  | v2
+(26 rows)
 
 SELECT * FROM information_schema.pg_property_data_types ORDER BY property_graph_name, property_name;
- property_graph_catalog |    property_graph_schema    | property_graph_name | property_name | data_type | character_maximum_length | character_octet_length | character_set_catalog | character_set_schema | character_set_name | collation_catalog | collation_schema | collation_name | numeric_precision | numeric_precision_radix | numeric_scale | datetime_precision | interval_type | interval_precision | user_defined_type_catalog | user_defined_type_schema | user_defined_type_name | scope_catalog | scope_schema | scope_name | maximum_cardinality | dtd_identifier 
-------------------------+-----------------------------+---------------------+---------------+-----------+--------------------------+------------------------+-----------------------+----------------------+--------------------+-------------------+------------------+----------------+-------------------+-------------------------+---------------+--------------------+---------------+--------------------+---------------------------+--------------------------+------------------------+---------------+--------------+------------+---------------------+----------------
- regression             | create_property_graph_tests | g2                  | a             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
- regression             | create_property_graph_tests | g2                  | b             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | b
- regression             | create_property_graph_tests | g2                  | i             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | i
- regression             | create_property_graph_tests | g2                  | j             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | j
- regression             | create_property_graph_tests | g2                  | k             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | k
- regression             | create_property_graph_tests | g2                  | t             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | t
- regression             | create_property_graph_tests | g2                  | x             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | x
- regression             | create_property_graph_tests | g2                  | y             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | y
- regression             | create_property_graph_tests | g2                  | z             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | z
- regression             | create_property_graph_tests | g3                  | a             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
- regression             | create_property_graph_tests | g3                  | b             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | b
- regression             | create_property_graph_tests | g3                  | x             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | x
- regression             | create_property_graph_tests | g3                  | y             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | y
- regression             | create_property_graph_tests | g3                  | z             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | z
- regression             | create_property_graph_tests | g4                  | a             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
- regression             | create_property_graph_tests | g4                  | i             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | i
- regression             | create_property_graph_tests | g4                  | i_j           | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | i_j
- regression             | create_property_graph_tests | g4                  | kk            | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | kk
- regression             | create_property_graph_tests | g4                  | t             | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | t
- regression             | create_property_graph_tests | g4                  | x             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | x
- regression             | create_property_graph_tests | g4                  | yy            | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | yy
- regression             | create_property_graph_tests | g4                  | zz            | text      |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | zz
- regression             | create_property_graph_tests | g5                  | a             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
- regression             | create_property_graph_tests | g5                  | b             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | b
- regression             | create_property_graph_tests | g5                  | c             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | c
- regression             | create_property_graph_tests | g5                  | d             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | d
- regression             | create_property_graph_tests | g5                  | e             | integer   |                          |                        |                       |                      |                    |                   |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | e
-(27 rows)
+ property_graph_catalog |    property_graph_schema    | property_graph_name | property_name |     data_type     | character_maximum_length | character_octet_length | character_set_catalog | character_set_schema | character_set_name | collation_catalog | collation_schema | collation_name | numeric_precision | numeric_precision_radix | numeric_scale | datetime_precision | interval_type | interval_precision | user_defined_type_catalog | user_defined_type_schema | user_defined_type_name | scope_catalog | scope_schema | scope_name | maximum_cardinality | dtd_identifier 
+------------------------+-----------------------------+---------------------+---------------+-------------------+--------------------------+------------------------+-----------------------+----------------------+--------------------+-------------------+------------------+----------------+-------------------+-------------------------+---------------+--------------------+---------------+--------------------+---------------------------+--------------------------+------------------------+---------------+--------------+------------+---------------------+----------------
+ regression             | create_property_graph_tests | g2                  | a             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
+ regression             | create_property_graph_tests | g2                  | b             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | b
+ regression             | create_property_graph_tests | g2                  | i             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | i
+ regression             | create_property_graph_tests | g2                  | j             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | j
+ regression             | create_property_graph_tests | g2                  | k             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | k
+ regression             | create_property_graph_tests | g2                  | t             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | t
+ regression             | create_property_graph_tests | g2                  | x             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | x
+ regression             | create_property_graph_tests | g2                  | y             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | y
+ regression             | create_property_graph_tests | g2                  | z             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | z
+ regression             | create_property_graph_tests | g3                  | a             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
+ regression             | create_property_graph_tests | g3                  | b             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | b
+ regression             | create_property_graph_tests | g3                  | x             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | x
+ regression             | create_property_graph_tests | g3                  | y             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | y
+ regression             | create_property_graph_tests | g3                  | z             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | z
+ regression             | create_property_graph_tests | g4                  | a             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
+ regression             | create_property_graph_tests | g4                  | i             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | i
+ regression             | create_property_graph_tests | g4                  | i_j           | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | i_j
+ regression             | create_property_graph_tests | g4                  | kk            | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | kk
+ regression             | create_property_graph_tests | g4                  | t             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | t
+ regression             | create_property_graph_tests | g4                  | x             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | x
+ regression             | create_property_graph_tests | g4                  | yy            | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | yy
+ regression             | create_property_graph_tests | g4                  | zz            | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | zz
+ regression             | create_property_graph_tests | g5                  | a             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
+ regression             | create_property_graph_tests | g5                  | b             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | b
+ regression             | create_property_graph_tests | g5                  | c             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | c
+ regression             | create_property_graph_tests | g5                  | d             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | d
+ regression             | create_property_graph_tests | g5                  | e             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | e
+ regression             | create_property_graph_tests | gc1                 | a             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
+ regression             | create_property_graph_tests | gc1                 | b             | character varying |                          |                        |                       |                      |                    | regression        | pg_catalog       | C              |                   |                         |               |                    |               |                    | regression                | pg_catalog               | varchar                |               |              |            |                     | b
+ regression             | create_property_graph_tests | gc1                 | eb            | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | eb
+ regression             | create_property_graph_tests | gc1                 | ek1           | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | ek1
+ regression             | create_property_graph_tests | gc1                 | ek2           | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | ek2
+ regression             | create_property_graph_tests | gt                  | a             | integer           |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int4                   |               |              |            |                     | a
+ regression             | create_property_graph_tests | gt                  | b             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | b
+ regression             | create_property_graph_tests | gt                  | c             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | c
+ regression             | create_property_graph_tests | gt                  | k1            | bigint            |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | int8                   |               |              |            |                     | k1
+ regression             | create_property_graph_tests | gt                  | k2            | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | k2
+ regression             | create_property_graph_tests | gt                  | m             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | m
+ regression             | create_property_graph_tests | gt                  | n             | text              |                          |                        |                       |                      |                    | regression        |                  |                |                   |                         |               |                    |               |                    | regression                | pg_catalog               | text                   |               |              |            |                     | n
+(39 rows)
 
 SELECT * FROM information_schema.pg_property_graph_privileges WHERE grantee LIKE 'regress%' ORDER BY property_graph_name;
        grantor       |       grantee       | property_graph_catalog |    property_graph_schema    | property_graph_name | privilege_type | is_grantable 
