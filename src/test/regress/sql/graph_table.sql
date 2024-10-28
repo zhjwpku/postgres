@@ -322,7 +322,8 @@ SELECT * FROM GRAPH_TABLE (g1 MATCH (a is vl1)->(b)->(a is vl2) WHERE a.vname <>
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a is vl1)->(b)->(a) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a)->(b)->(a is vl1) COLUMNS (a.vname AS self, b.vname AS through, a.vprop1 AS self_p1, b.vprop1 AS through_p1)) ORDER BY self, through;
 
--- add an edge with same vertex as source and destination to test loops
+-- add an edge with same vertex as source and destination to test loops. Also
+-- use this for collation tests
 CREATE TABLE e3_3 (src_id int,
                     dest_id int,
                     ename varchar(10),
@@ -336,37 +337,53 @@ ALTER PROPERTY GRAPH g1 ADD EDGE TABLES (
 );
 
 INSERT INTO e3_3 VALUES (2003, 2003, 'e331', 10010);
+INSERT INTO e3_3 VALUES (2003, 2003, 'E331', 10010);
 -- cyclic pattern with edge patterns with same variable name
-SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.vname AS self, b.ename AS loop_name));
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.vname AS self, b.ename AS loop_name)) ORDER BY loop_name ASC;
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.vname AS self, b.ename AS loop_name)) ORDER BY loop_name COLLATE "C" ASC;
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b IS el2 WHERE b.ename > 'E331' COLLATE "C"]->(a)-[b]->(a) COLUMNS (a.vname AS self, b.ename AS loop_name));
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(a)-[b]->(a) WHERE b.ename > 'E331' COLLATE "C" COLUMNS (a.vname AS self, b.ename AS loop_name));
+SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.vname AS self, b.ename AS loop_name)) WHERE loop_name > 'E331' COLLATE "C";
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(c)-[b]->(d) COLUMNS (a.vname AS aname, b.ename AS bname, c.vname AS cname, d.vname AS dname)); --error
 
 -- property graph with some of the elements, labels and properties same as the
 -- previous one. Test whether components from the specified property graph are
--- used.
+-- used. Also use this for collation tests
 create property graph g2
 vertex tables (
 	v1
-        label l1 properties ('g2.' || vname as elname),
+        label l1 properties ('g2.' || vname COLLATE "C" as elname),
 	v2 key (id1, id2)
-        label l1 properties ('g2.' || vname as elname),
+        label l1 properties ('g2.' || vname COLLATE "C" as elname),
 	v3
-        label l1 properties ('g2.' || vname as elname)
+        label l1 properties ('g2.' || vname COLLATE "C" as elname)
 )
 edge tables (
 	e1_2 key (id_1, id_2_1, id_2_2)
 		source key (id_1) references v1 (id)
 		destination key (id_2_1, id_2_2) references v2 (id1, id2)
-        label l1 properties ('g2.' || ename as elname),
+        label l1 properties ('g2.' || ename COLLATE "C" as elname),
 	e1_3
 		source key (id_1) references v1 (id)
 		destination key (id_3) references v3 (id)
-        label l1 properties ('g2.' || ename as elname),
+        label l1 properties ('g2.' || ename COLLATE "C" as elname),
     e2_3 key (id_2_1, id_2_2, id_3)
         source key (id_2_1, id_2_2) references v2 (id1, id2)
         destination key (id_3) references v3 (id)
-        label l1 properties ('g2.' || ename as elname)
+        label l1 properties ('g2.' || ename COLLATE "C" as elname),
+    e3_3 KEY (src_id, dest_id)
+        SOURCE KEY (src_id) REFERENCES v3 (id)
+        DESTINATION KEY (src_id) REFERENCES v3 (id)
+        LABEL l1 PROPERTIES ('g2.' || ename COLLATE "C" as elname)
 );
-select sn, cn, dn from graph_table (g2 match (src : l1)-[conn : l1]->(dest : l1) columns (src.elname as sn, conn.elname as cn, dest.elname as dn));
+select sn, cn, dn from graph_table (g2 match (src : l1)-[conn : l1]->(dest : l1) columns (src.elname as sn, conn.elname as cn, dest.elname as dn)) ORDER BY 1, 2, 3;
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname COLLATE pg_catalog."default" AS loop_name)) ORDER BY loop_name ASC;
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b WHERE b.elname > 'g2.E331']->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name));
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) WHERE b.elname > 'g2.E331' COLUMNS (a.elname AS self, b.elname AS loop_name));
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name)) WHERE loop_name > 'g2.E331';
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b WHERE b.elname > 'g2.e331' COLLATE pg_catalog."default"]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name));
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) WHERE b.elname > 'g2.e331' COLLATE pg_catalog."default" COLUMNS (a.elname AS self, b.elname AS loop_name));
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name)) WHERE loop_name > 'g2.e331' COLLATE pg_catalog."default";
 
 CREATE VIEW customers_us AS SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.name AS customer_name));
 
@@ -427,6 +444,10 @@ SELECT *
          GRAPH_TABLE (myshop2 MATCH (cg IS customers WHERE cg.address = co.address)-[IS customer_orders]->(o IS orders)
                               COLUMNS (cg.name_redacted AS customer_name_redacted))
     WHERE co.customer_id = 1;
+
+-- graph table in a subquery
+SELECT * FROM customers co WHERE co.customer_id =
+    (SELECT customer_id FROM GRAPH_TABLE (myshop2 MATCH (cg IS customers WHERE cg.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (cg.customer_id)));
 
 -- query within graph table
 SELECT sname, dname
