@@ -1873,128 +1873,6 @@ describeOneTableDetails(const char *schemaname,
 		goto error_return;		/* not an error, just return early */
 	}
 
-	/* Identify whether we should print collation, nullable, default vals */
-	if (tableinfo.relkind == RELKIND_RELATION ||
-		tableinfo.relkind == RELKIND_VIEW ||
-		tableinfo.relkind == RELKIND_MATVIEW ||
-		tableinfo.relkind == RELKIND_FOREIGN_TABLE ||
-		tableinfo.relkind == RELKIND_COMPOSITE_TYPE ||
-		tableinfo.relkind == RELKIND_PARTITIONED_TABLE)
-		show_column_details = true;
-
-	/*
-	 * Get per-column info
-	 *
-	 * Since the set of query columns we need varies depending on relkind and
-	 * server version, we compute all the column numbers on-the-fly.  Column
-	 * number variables for columns not fetched are left as -1; this avoids
-	 * duplicative test logic below.
-	 */
-	cols = 0;
-	printfPQExpBuffer(&buf, "SELECT a.attname");
-	attname_col = cols++;
-	appendPQExpBufferStr(&buf, ",\n  pg_catalog.format_type(a.atttypid, a.atttypmod)");
-	atttype_col = cols++;
-
-	if (show_column_details)
-	{
-		/* use "pretty" mode for expression to avoid excessive parentheses */
-		appendPQExpBufferStr(&buf,
-							 ",\n  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)"
-							 "\n   FROM pg_catalog.pg_attrdef d"
-							 "\n   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef)"
-							 ",\n  a.attnotnull");
-		attrdef_col = cols++;
-		attnotnull_col = cols++;
-		appendPQExpBufferStr(&buf, ",\n  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t\n"
-							 "   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation");
-		attcoll_col = cols++;
-		if (pset.sversion >= 100000)
-			appendPQExpBufferStr(&buf, ",\n  a.attidentity");
-		else
-			appendPQExpBufferStr(&buf, ",\n  ''::pg_catalog.char AS attidentity");
-		attidentity_col = cols++;
-		if (pset.sversion >= 120000)
-			appendPQExpBufferStr(&buf, ",\n  a.attgenerated");
-		else
-			appendPQExpBufferStr(&buf, ",\n  ''::pg_catalog.char AS attgenerated");
-		attgenerated_col = cols++;
-	}
-	if (tableinfo.relkind == RELKIND_INDEX ||
-		tableinfo.relkind == RELKIND_PARTITIONED_INDEX)
-	{
-		if (pset.sversion >= 110000)
-		{
-			appendPQExpBuffer(&buf, ",\n  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '%s') THEN '%s' ELSE '%s' END AS is_key",
-							  oid,
-							  gettext_noop("yes"),
-							  gettext_noop("no"));
-			isindexkey_col = cols++;
-		}
-		appendPQExpBufferStr(&buf, ",\n  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef");
-		indexdef_col = cols++;
-	}
-	/* FDW options for foreign table column */
-	if (tableinfo.relkind == RELKIND_FOREIGN_TABLE)
-	{
-		appendPQExpBufferStr(&buf, ",\n  CASE WHEN attfdwoptions IS NULL THEN '' ELSE "
-							 "  '(' || pg_catalog.array_to_string(ARRAY(SELECT pg_catalog.quote_ident(option_name) || ' ' || pg_catalog.quote_literal(option_value)  FROM "
-							 "  pg_catalog.pg_options_to_table(attfdwoptions)), ', ') || ')' END AS attfdwoptions");
-		fdwopts_col = cols++;
-	}
-	if (verbose)
-	{
-		appendPQExpBufferStr(&buf, ",\n  a.attstorage");
-		attstorage_col = cols++;
-
-		/* compression info, if relevant to relkind */
-		if (pset.sversion >= 140000 &&
-			!pset.hide_compression &&
-			(tableinfo.relkind == RELKIND_RELATION ||
-			 tableinfo.relkind == RELKIND_PARTITIONED_TABLE ||
-			 tableinfo.relkind == RELKIND_MATVIEW))
-		{
-			appendPQExpBufferStr(&buf, ",\n  a.attcompression AS attcompression");
-			attcompression_col = cols++;
-		}
-
-		/* stats target, if relevant to relkind */
-		if (tableinfo.relkind == RELKIND_RELATION ||
-			tableinfo.relkind == RELKIND_INDEX ||
-			tableinfo.relkind == RELKIND_PARTITIONED_INDEX ||
-			tableinfo.relkind == RELKIND_MATVIEW ||
-			tableinfo.relkind == RELKIND_FOREIGN_TABLE ||
-			tableinfo.relkind == RELKIND_PARTITIONED_TABLE)
-		{
-			appendPQExpBufferStr(&buf, ",\n  CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget");
-			attstattarget_col = cols++;
-		}
-
-		/*
-		 * In 9.0+, we have column comments for: relations, views, composite
-		 * types, and foreign tables (cf. CommentObject() in comment.c).
-		 */
-		if (tableinfo.relkind == RELKIND_RELATION ||
-			tableinfo.relkind == RELKIND_VIEW ||
-			tableinfo.relkind == RELKIND_MATVIEW ||
-			tableinfo.relkind == RELKIND_FOREIGN_TABLE ||
-			tableinfo.relkind == RELKIND_COMPOSITE_TYPE ||
-			tableinfo.relkind == RELKIND_PARTITIONED_TABLE)
-		{
-			appendPQExpBufferStr(&buf, ",\n  pg_catalog.col_description(a.attrelid, a.attnum)");
-			attdescr_col = cols++;
-		}
-	}
-
-	appendPQExpBufferStr(&buf, "\nFROM pg_catalog.pg_attribute a");
-	appendPQExpBuffer(&buf, "\nWHERE a.attrelid = '%s' AND a.attnum > 0 AND NOT a.attisdropped", oid);
-	appendPQExpBufferStr(&buf, "\nORDER BY a.attnum;");
-
-	res = PSQLexec(buf.data);
-	if (!res)
-		goto error_return;
-	numrows = PQntuples(res);
-
 	/* Make title */
 	switch (tableinfo.relkind)
 	{
@@ -2061,32 +1939,171 @@ describeOneTableDetails(const char *schemaname,
 			break;
 	}
 
-	/* Fill headers[] with the names of the columns we will output */
-	cols = 0;
-	headers[cols++] = gettext_noop("Column");
-	headers[cols++] = gettext_noop("Type");
-	if (show_column_details)
-	{
-		headers[cols++] = gettext_noop("Collation");
-		headers[cols++] = gettext_noop("Nullable");
-		headers[cols++] = gettext_noop("Default");
-	}
-	if (isindexkey_col >= 0)
-		headers[cols++] = gettext_noop("Key?");
-	if (indexdef_col >= 0)
-		headers[cols++] = gettext_noop("Definition");
-	if (fdwopts_col >= 0)
-		headers[cols++] = gettext_noop("FDW options");
-	if (attstorage_col >= 0)
-		headers[cols++] = gettext_noop("Storage");
-	if (attcompression_col >= 0)
-		headers[cols++] = gettext_noop("Compression");
-	if (attstattarget_col >= 0)
-		headers[cols++] = gettext_noop("Stats target");
-	if (attdescr_col >= 0)
-		headers[cols++] = gettext_noop("Description");
+	/* Identify whether we should print collation, nullable, default vals */
+	if (tableinfo.relkind == RELKIND_RELATION ||
+		tableinfo.relkind == RELKIND_VIEW ||
+		tableinfo.relkind == RELKIND_MATVIEW ||
+		tableinfo.relkind == RELKIND_FOREIGN_TABLE ||
+		tableinfo.relkind == RELKIND_COMPOSITE_TYPE ||
+		tableinfo.relkind == RELKIND_PARTITIONED_TABLE)
+		show_column_details = true;
 
-	Assert(cols <= lengthof(headers));
+	/*
+	 * Get per-column info
+	 *
+	 * Since the set of query columns we need varies depending on relkind and
+	 * server version, we compute all the column numbers on-the-fly.  Column
+	 * number variables for columns not fetched are left as -1; this avoids
+	 * duplicative test logic below. Property graph relations do not have
+	 * columns.
+	 */
+	cols = 0;
+	numrows = 0;
+	if (tableinfo.relkind != RELKIND_PROPGRAPH)
+	{
+		printfPQExpBuffer(&buf, "SELECT a.attname");
+		attname_col = cols++;
+		appendPQExpBufferStr(&buf, ",\n  pg_catalog.format_type(a.atttypid, a.atttypmod)");
+		atttype_col = cols++;
+
+		if (show_column_details)
+		{
+			/* use "pretty" mode for expression to avoid excessive parentheses */
+			appendPQExpBufferStr(&buf,
+								 ",\n  (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)"
+								 "\n   FROM pg_catalog.pg_attrdef d"
+								 "\n   WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef)"
+								 ",\n  a.attnotnull");
+			attrdef_col = cols++;
+			attnotnull_col = cols++;
+			appendPQExpBufferStr(&buf, ",\n  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t\n"
+								 "   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation");
+			attcoll_col = cols++;
+			if (pset.sversion >= 100000)
+				appendPQExpBufferStr(&buf, ",\n  a.attidentity");
+			else
+				appendPQExpBufferStr(&buf, ",\n  ''::pg_catalog.char AS attidentity");
+			attidentity_col = cols++;
+			if (pset.sversion >= 120000)
+				appendPQExpBufferStr(&buf, ",\n  a.attgenerated");
+			else
+				appendPQExpBufferStr(&buf, ",\n  ''::pg_catalog.char AS attgenerated");
+			attgenerated_col = cols++;
+		}
+		if (tableinfo.relkind == RELKIND_INDEX ||
+			tableinfo.relkind == RELKIND_PARTITIONED_INDEX)
+		{
+			if (pset.sversion >= 110000)
+			{
+				appendPQExpBuffer(&buf, ",\n  CASE WHEN a.attnum <= (SELECT i.indnkeyatts FROM pg_catalog.pg_index i WHERE i.indexrelid = '%s') THEN '%s' ELSE '%s' END AS is_key",
+								  oid,
+								  gettext_noop("yes"),
+								  gettext_noop("no"));
+				isindexkey_col = cols++;
+			}
+			appendPQExpBufferStr(&buf, ",\n  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef");
+			indexdef_col = cols++;
+		}
+		/* FDW options for foreign table column */
+		if (tableinfo.relkind == RELKIND_FOREIGN_TABLE)
+		{
+			appendPQExpBufferStr(&buf, ",\n  CASE WHEN attfdwoptions IS NULL THEN '' ELSE "
+								 "  '(' || pg_catalog.array_to_string(ARRAY(SELECT pg_catalog.quote_ident(option_name) || ' ' || pg_catalog.quote_literal(option_value)  FROM "
+								 "  pg_catalog.pg_options_to_table(attfdwoptions)), ', ') || ')' END AS attfdwoptions");
+			fdwopts_col = cols++;
+		}
+		if (verbose)
+		{
+			appendPQExpBufferStr(&buf, ",\n  a.attstorage");
+			attstorage_col = cols++;
+
+			/* compression info, if relevant to relkind */
+			if (pset.sversion >= 140000 &&
+				!pset.hide_compression &&
+				(tableinfo.relkind == RELKIND_RELATION ||
+				 tableinfo.relkind == RELKIND_PARTITIONED_TABLE ||
+				 tableinfo.relkind == RELKIND_MATVIEW))
+			{
+				appendPQExpBufferStr(&buf, ",\n  a.attcompression AS attcompression");
+				attcompression_col = cols++;
+			}
+
+			/* stats target, if relevant to relkind */
+			if (tableinfo.relkind == RELKIND_RELATION ||
+				tableinfo.relkind == RELKIND_INDEX ||
+				tableinfo.relkind == RELKIND_PARTITIONED_INDEX ||
+				tableinfo.relkind == RELKIND_MATVIEW ||
+				tableinfo.relkind == RELKIND_FOREIGN_TABLE ||
+				tableinfo.relkind == RELKIND_PARTITIONED_TABLE)
+			{
+				appendPQExpBufferStr(&buf, ",\n  CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget");
+				attstattarget_col = cols++;
+			}
+
+			/*
+			 * In 9.0+, we have column comments for: relations, views,
+			 * composite types, and foreign tables (cf. CommentObject() in
+			 * comment.c).
+			 */
+			if (tableinfo.relkind == RELKIND_RELATION ||
+				tableinfo.relkind == RELKIND_VIEW ||
+				tableinfo.relkind == RELKIND_MATVIEW ||
+				tableinfo.relkind == RELKIND_FOREIGN_TABLE ||
+				tableinfo.relkind == RELKIND_COMPOSITE_TYPE ||
+				tableinfo.relkind == RELKIND_PARTITIONED_TABLE)
+			{
+				appendPQExpBufferStr(&buf, ",\n  pg_catalog.col_description(a.attrelid, a.attnum)");
+				attdescr_col = cols++;
+			}
+		}
+
+		appendPQExpBufferStr(&buf, "\nFROM pg_catalog.pg_attribute a");
+		appendPQExpBuffer(&buf, "\nWHERE a.attrelid = '%s' AND a.attnum > 0 AND NOT a.attisdropped", oid);
+		appendPQExpBufferStr(&buf, "\nORDER BY a.attnum;");
+
+		res = PSQLexec(buf.data);
+		if (!res)
+			goto error_return;
+		numrows = PQntuples(res);
+
+		/* Fill headers[] with the names of the columns we will output */
+		cols = 0;
+		if (tableinfo.relkind != RELKIND_PROPGRAPH)
+		{
+			/* A property graph does not project any columns by itself. */
+			headers[cols++] = gettext_noop("Column");
+			headers[cols++] = gettext_noop("Type");
+		}
+		if (show_column_details)
+		{
+			headers[cols++] = gettext_noop("Collation");
+			headers[cols++] = gettext_noop("Nullable");
+			headers[cols++] = gettext_noop("Default");
+		}
+		if (isindexkey_col >= 0)
+			headers[cols++] = gettext_noop("Key?");
+		if (indexdef_col >= 0)
+			headers[cols++] = gettext_noop("Definition");
+		if (fdwopts_col >= 0)
+			headers[cols++] = gettext_noop("FDW options");
+		if (attstorage_col >= 0)
+			headers[cols++] = gettext_noop("Storage");
+		if (attcompression_col >= 0)
+			headers[cols++] = gettext_noop("Compression");
+		if (attstattarget_col >= 0)
+			headers[cols++] = gettext_noop("Stats target");
+		if (attdescr_col >= 0)
+			headers[cols++] = gettext_noop("Description");
+
+		Assert(cols <= lengthof(headers));
+	}
+
+	/*
+	 * Like a property graph, if the relation doesn't have any columns,
+	 * suppress borders.
+	 */
+	if (cols <= 0 && numrows <= 0)
+		myopt.border = 0;
 
 	printTableInit(&cont, &myopt, title.data, cols, numrows);
 	printTableInitialized = true;

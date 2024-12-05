@@ -654,13 +654,11 @@ ERROR:  "pg_type" is not a property graph
 -- TODO
 \d g1
 Property graph "create_property_graph_tests.g1"
- Column | Type 
---------+------
+
 
 \d+ g1
 Property graph "create_property_graph_tests.g1"
- Column | Type | Storage 
---------+------+---------
+
 Property graph definition:
  CREATE PROPERTY GRAPH create_property_graph_tests.g1
 
