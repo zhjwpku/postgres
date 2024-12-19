@@ -23,20 +23,31 @@
 
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/skey.h"
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "catalog/index.h"
+#include "catalog/partition.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_namespace.h"
+#include "catalog/pg_operator.h"
+#include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "executor/execPartition.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "lib/ilist.h"
 #include "miscadmin.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_relation.h"
+#include "partitioning/partdesc.h"
 #include "storage/bufmgr.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
@@ -48,6 +59,8 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rangetypes.h"
+#include "utils/partcache.h"
 #include "utils/rel.h"
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
@@ -157,6 +170,12 @@ typedef void (*RI_PlanFreeFunc_type) (struct RI_Plan *plan);
  */
 typedef struct RI_Plan
 {
+	/* Constraint for this plan. */
+	const RI_ConstraintInfo *riinfo;
+
+	/* RI query type code. */
+	int				constr_queryno;
+
 	/*
 	 * Context under which this struct and its subsidiary data gets allocated.
 	 * It is made a child of CacheMemoryContext.
@@ -270,7 +289,8 @@ static const RI_ConstraintInfo *ri_FetchConstraintInfo(Trigger *trigger,
 													   Relation trig_rel, bool rel_is_pk);
 static const RI_ConstraintInfo *ri_LoadConstraintInfo(Oid constraintOid);
 static Oid	get_ri_constraint_root(Oid constrOid);
-static RI_Plan *ri_PlanCheck(RI_PlanCreateFunc_type plan_create_func,
+static RI_Plan *ri_PlanCheck(const RI_ConstraintInfo *riinfo,
+							 RI_PlanCreateFunc_type plan_create_func,
 							 const char *querystr, int nargs, Oid *argtypes,
 							 RI_QueryKey *qkey, Relation fk_rel, Relation pk_rel);
 static bool ri_PerformCheck(const RI_ConstraintInfo *riinfo,
@@ -294,6 +314,15 @@ static int ri_SqlStringPlanExecute(RI_Plan *plan, Relation fk_rel, Relation pk_r
 						Snapshot crosscheck_snapshot,
 						int limit, CmdType *last_stmt_cmdtype);
 static void ri_SqlStringPlanFree(RI_Plan *plan);
+static void ri_LookupKeyInPkRelPlanCreate(RI_Plan *plan,
+										  const char *querystr, int nargs, Oid *paramtypes);
+static int ri_LookupKeyInPkRel(struct RI_Plan *plan,
+							   Relation fk_rel, Relation pk_rel,
+							   Datum *pk_vals, char *pk_nulls,
+							   Snapshot crosscheck_snapshot,
+							   int limit, CmdType *last_stmt_cmdtype);
+static bool ri_LookupKeyInPkRelPlanIsValid(RI_Plan *plan);
+static void ri_LookupKeyInPkRelPlanFree(RI_Plan *plan);
 
 
 /*
@@ -389,9 +418,9 @@ RI_FKey_check(TriggerData *trigdata)
 
 					/*
 					 * MATCH PARTIAL - all non-null columns must match. (not
-					 * implemented, can be done by modifying the query below
-					 * to only include non-null columns, or by writing a
-					 * special version here)
+					 * implemented, can be done by modifying
+					 * LookupKeyInPkRelPlanExecute() to only include non-null
+					 * columns.
 					 */
 					break;
 #endif
@@ -411,24 +440,15 @@ RI_FKey_check(TriggerData *trigdata)
 
 	if ((qplan = ri_FetchPreparedPlan(&qkey)) == NULL)
 	{
-		StringInfoData querybuf;
-		char		pkrelname[MAX_QUOTED_REL_NAME_LEN];
-		char		attname[MAX_QUOTED_NAME_LEN];
-		char		paramname[16];
-		const char *querysep;
-		Oid			queryoids[RI_MAX_NUMKEYS];
-		const char *pk_only;
-
 		/* ----------
-		 * The query string built is
+		 * For simple FKs, use ri_LookupKeyInPkRelPlanCreate() to create
+		 * the plan to check the row, which is equivalent to doing
 		 *	SELECT 1 FROM [ONLY] <pktable> x WHERE pkatt1 = $1 [AND ...]
 		 *		   FOR KEY SHARE OF x
-		 * The type id's for the $ parameters are those of the
-		 * corresponding FK attributes.
 		 *
-		 * But for temporal FKs we need to make sure
-		 * the FK's range is completely covered.
-		 * So we use this query instead:
+		 * But for temporal FKs we use ri_SqlStringPlanCreate() because we need
+		 * to make sure the FK's range is completely covered, which is done
+		 * with this query instead:
 		 *  SELECT 1
 		 *	FROM	(
 		 *		SELECT pkperiodatt AS r
@@ -442,45 +462,45 @@ RI_FKey_check(TriggerData *trigdata)
 		 * we can make this a bit simpler.
 		 * ----------
 		 */
-		initStringInfo(&querybuf);
-		pk_only = pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?
-			"" : "ONLY ";
-		quoteRelationName(pkrelname, pk_rel);
 		if (riinfo->hasperiod)
 		{
+			StringInfoData querybuf;
+			char		pkrelname[MAX_QUOTED_REL_NAME_LEN];
+			char		attname[MAX_QUOTED_NAME_LEN];
+			char		paramname[16];
+			const char *querysep;
+			Oid			queryoids[RI_MAX_NUMKEYS];
+			const char *pk_only;
+			Oid			fk_type;
+
+			initStringInfo(&querybuf);
+			pk_only = pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?
+				"" : "ONLY ";
+			quoteRelationName(pkrelname, pk_rel);
 			quoteOneName(attname,
 						 RIAttName(pk_rel, riinfo->pk_attnums[riinfo->nkeys - 1]));
-
 			appendStringInfo(&querybuf,
 							 "SELECT 1 FROM (SELECT %s AS r FROM %s%s x",
 							 attname, pk_only, pkrelname);
-		}
-		else
-		{
-			appendStringInfo(&querybuf, "SELECT 1 FROM %s%s x",
-							 pk_only, pkrelname);
-		}
-		querysep = "WHERE";
-		for (int i = 0; i < riinfo->nkeys; i++)
-		{
-			Oid			pk_type = RIAttType(pk_rel, riinfo->pk_attnums[i]);
-			Oid			fk_type = RIAttType(fk_rel, riinfo->fk_attnums[i]);
+			querysep = "WHERE";
+			for (int i = 0; i < riinfo->nkeys; i++)
+			{
+				Oid			pk_type = RIAttType(pk_rel, riinfo->pk_attnums[i]);
 
-			quoteOneName(attname,
-						 RIAttName(pk_rel, riinfo->pk_attnums[i]));
-			sprintf(paramname, "$%d", i + 1);
-			ri_GenerateQual(&querybuf, querysep,
-							attname, pk_type,
-							riinfo->pf_eq_oprs[i],
-							paramname, fk_type);
-			querysep = "AND";
-			queryoids[i] = fk_type;
-		}
-		appendStringInfoString(&querybuf, " FOR KEY SHARE OF x");
-		if (riinfo->hasperiod)
-		{
-			Oid			fk_type = RIAttType(fk_rel, riinfo->fk_attnums[riinfo->nkeys - 1]);
+				fk_type = RIAttType(fk_rel, riinfo->fk_attnums[i]);
+				quoteOneName(attname,
+							 RIAttName(pk_rel, riinfo->pk_attnums[i]));
+				sprintf(paramname, "$%d", i + 1);
+				ri_GenerateQual(&querybuf, querysep,
+								attname, pk_type,
+								riinfo->pf_eq_oprs[i],
+								paramname, fk_type);
+				querysep = "AND";
+				queryoids[i] = fk_type;
+			}
+			appendStringInfoString(&querybuf, " FOR KEY SHARE OF x");
 
+			fk_type = RIAttType(fk_rel, riinfo->fk_attnums[riinfo->nkeys - 1]);
 			appendStringInfoString(&querybuf, ") x1 HAVING ");
 			sprintf(paramname, "$%d", riinfo->nkeys);
 			ri_GenerateQual(&querybuf, "",
@@ -488,26 +508,24 @@ RI_FKey_check(TriggerData *trigdata)
 							riinfo->agged_period_contained_by_oper,
 							"pg_catalog.range_agg", ANYMULTIRANGEOID);
 			appendStringInfoString(&querybuf, "(x1.r)");
-		}
 
-		/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
-		qplan = ri_PlanCheck(ri_SqlStringPlanCreate,
-							 querybuf.data, riinfo->nkeys, queryoids,
-							 &qkey, fk_rel, pk_rel);
+			/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
+			qplan = ri_PlanCheck(riinfo, ri_SqlStringPlanCreate,
+								 querybuf.data, riinfo->nkeys, queryoids,
+								 &qkey, fk_rel, pk_rel);
+		}
+		else
+			qplan = ri_PlanCheck(riinfo, ri_LookupKeyInPkRelPlanCreate,
+								 NULL, 0 /* nargs */, NULL /* argtypes */,
+								 &qkey, fk_rel, pk_rel);
 	}
 
-	/*
-	 * Now check that foreign key exists in PK table
-	 *
-	 * XXX detectNewRows must be true when a partitioned table is on the
-	 * referenced side.  The reason is that our snapshot must be fresh in
-	 * order for the hack in find_inheritance_children() to work.
-	 */
+	/* Now check that foreign key exists in PK table */
 	ri_PerformCheck(riinfo, &qkey, qplan,
 					fk_rel, pk_rel,
 					NULL, newslot,
 					false,
-					pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE,
+					false,
 					CMD_SELECT);
 
 	table_close(pk_rel, RowShareLock);
@@ -578,24 +596,15 @@ ri_Check_Pk_Match(Relation pk_rel, Relation fk_rel,
 
 	if ((qplan = ri_FetchPreparedPlan(&qkey)) == NULL)
 	{
-		StringInfoData querybuf;
-		char		pkrelname[MAX_QUOTED_REL_NAME_LEN];
-		char		attname[MAX_QUOTED_NAME_LEN];
-		char		paramname[16];
-		const char *querysep;
-		const char *pk_only;
-		Oid			queryoids[RI_MAX_NUMKEYS];
-
 		/* ----------
-		 * The query string built is
+		 * For simple FKs, use ri_LookupKeyInPkRelPlanCreate() to create
+		 * the plan to check the row, which is equivalent to doing
 		 *	SELECT 1 FROM [ONLY] <pktable> x WHERE pkatt1 = $1 [AND ...]
 		 *		   FOR KEY SHARE OF x
-		 * The type id's for the $ parameters are those of the
-		 * PK attributes themselves.
 		 *
-		 * But for temporal FKs we need to make sure
-		 * the old PK's range is completely covered.
-		 * So we use this query instead:
+		 * But for temporal FKs we use ri_SqlStringPlanCreate() because we need
+		 * to make sure the FK's range is completely covered, which is done
+		 * with this query instead:
 		 *  SELECT 1
 		 *  FROM    (
 		 *	  SELECT pkperiodatt AS r
@@ -609,43 +618,44 @@ ri_Check_Pk_Match(Relation pk_rel, Relation fk_rel,
 		 * we can make this a bit simpler.
 		 * ----------
 		 */
-		initStringInfo(&querybuf);
-		pk_only = pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?
-			"" : "ONLY ";
-		quoteRelationName(pkrelname, pk_rel);
 		if (riinfo->hasperiod)
 		{
+			StringInfoData querybuf;
+			char		pkrelname[MAX_QUOTED_REL_NAME_LEN];
+			char		attname[MAX_QUOTED_NAME_LEN];
+			char		paramname[16];
+			const char *querysep;
+			const char *pk_only;
+			Oid			queryoids[RI_MAX_NUMKEYS];
+			Oid			fk_type;
+
+			initStringInfo(&querybuf);
+			pk_only = pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ?
+				"" : "ONLY ";
+			quoteRelationName(pkrelname, pk_rel);
 			quoteOneName(attname, RIAttName(pk_rel, riinfo->pk_attnums[riinfo->nkeys - 1]));
 
 			appendStringInfo(&querybuf,
 							 "SELECT 1 FROM (SELECT %s AS r FROM %s%s x",
 							 attname, pk_only, pkrelname);
-		}
-		else
-		{
-			appendStringInfo(&querybuf, "SELECT 1 FROM %s%s x",
-							 pk_only, pkrelname);
-		}
-		querysep = "WHERE";
-		for (int i = 0; i < riinfo->nkeys; i++)
-		{
-			Oid			pk_type = RIAttType(pk_rel, riinfo->pk_attnums[i]);
+			querysep = "WHERE";
+			for (int i = 0; i < riinfo->nkeys; i++)
+			{
+				Oid			pk_type = RIAttType(pk_rel, riinfo->pk_attnums[i]);
 
-			quoteOneName(attname,
-						 RIAttName(pk_rel, riinfo->pk_attnums[i]));
-			sprintf(paramname, "$%d", i + 1);
-			ri_GenerateQual(&querybuf, querysep,
-							attname, pk_type,
-							riinfo->pp_eq_oprs[i],
-							paramname, pk_type);
-			querysep = "AND";
-			queryoids[i] = pk_type;
-		}
-		appendStringInfoString(&querybuf, " FOR KEY SHARE OF x");
-		if (riinfo->hasperiod)
-		{
-			Oid			fk_type = RIAttType(fk_rel, riinfo->fk_attnums[riinfo->nkeys - 1]);
+				quoteOneName(attname,
+							 RIAttName(pk_rel, riinfo->pk_attnums[i]));
+				sprintf(paramname, "$%d", i + 1);
+				ri_GenerateQual(&querybuf, querysep,
+								attname, pk_type,
+								riinfo->pp_eq_oprs[i],
+								paramname, pk_type);
+				querysep = "AND";
+				queryoids[i] = pk_type;
+			}
+			appendStringInfoString(&querybuf, " FOR KEY SHARE OF x");
 
+			fk_type = RIAttType(fk_rel, riinfo->fk_attnums[riinfo->nkeys - 1]);
 			appendStringInfoString(&querybuf, ") x1 HAVING ");
 			sprintf(paramname, "$%d", riinfo->nkeys);
 			ri_GenerateQual(&querybuf, "",
@@ -653,12 +663,15 @@ ri_Check_Pk_Match(Relation pk_rel, Relation fk_rel,
 							riinfo->agged_period_contained_by_oper,
 							"pg_catalog.range_agg", ANYMULTIRANGEOID);
 			appendStringInfoString(&querybuf, "(x1.r)");
+			/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
+			qplan = ri_PlanCheck(riinfo, ri_SqlStringPlanCreate,
+								 querybuf.data, riinfo->nkeys, queryoids,
+								 &qkey, fk_rel, pk_rel);
 		}
-
-		/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
-		qplan = ri_PlanCheck(ri_SqlStringPlanCreate,
-							 querybuf.data, riinfo->nkeys, queryoids,
-							 &qkey, fk_rel, pk_rel);
+		else
+			qplan = ri_PlanCheck(riinfo, ri_LookupKeyInPkRelPlanCreate,
+								 NULL, 0 /* nargs */, NULL /* argtypes */,
+								 &qkey, fk_rel, pk_rel);
 	}
 
 	/*
@@ -928,7 +941,7 @@ ri_restrict(TriggerData *trigdata, bool is_no_action)
 		appendStringInfoString(&querybuf, " FOR KEY SHARE OF x");
 
 		/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
-		qplan = ri_PlanCheck(ri_SqlStringPlanCreate,
+		qplan = ri_PlanCheck(riinfo, ri_SqlStringPlanCreate,
 							 querybuf.data, riinfo->nkeys, queryoids,
 							 &qkey, fk_rel, pk_rel);
 	}
@@ -1025,7 +1038,7 @@ RI_FKey_cascade_del(PG_FUNCTION_ARGS)
 		}
 
 		/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
-		qplan = ri_PlanCheck(ri_SqlStringPlanCreate,
+		qplan = ri_PlanCheck(riinfo, ri_SqlStringPlanCreate,
 							 querybuf.data, riinfo->nkeys, queryoids,
 							 &qkey, fk_rel, pk_rel);
 	}
@@ -1139,7 +1152,7 @@ RI_FKey_cascade_upd(PG_FUNCTION_ARGS)
 		appendBinaryStringInfo(&querybuf, qualbuf.data, qualbuf.len);
 
 		/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
-		qplan = ri_PlanCheck(ri_SqlStringPlanCreate,
+		qplan = ri_PlanCheck(riinfo, ri_SqlStringPlanCreate,
 							 querybuf.data, riinfo->nkeys * 2, queryoids,
 							 &qkey, fk_rel, pk_rel);
 	}
@@ -1363,7 +1376,7 @@ ri_set(TriggerData *trigdata, bool is_set_null, int tgkind)
 		}
 
 		/* Prepare and save the plan using ri_SqlStringPlanCreate(). */
-		qplan = ri_PlanCheck(ri_SqlStringPlanCreate,
+		qplan = ri_PlanCheck(riinfo, ri_SqlStringPlanCreate,
 							 querybuf.data, riinfo->nkeys, queryoids,
 							 &qkey, fk_rel, pk_rel);
 	}
@@ -2178,6 +2191,11 @@ ri_BuildQueryKey(RI_QueryKey *key, const RI_ConstraintInfo *riinfo,
 	 * saving lots of work and memory when there are many partitions with
 	 * similar FK constraints.
 	 *
+	 * We must not share the plan for RI_PLAN_CHECK_LOOKUPPK queries either,
+	 * because its execution function (ri_LookupKeyInPkRel()) expects to see
+	 * the RI_ConstraintInfo of the individual leaf partitions that the
+	 * query fired on.
+	 *
 	 * (Note that we must still have a separate RI_ConstraintInfo for each
 	 * constraint, because partitions can have different column orders,
 	 * resulting in different pk_attnums[] or fk_attnums[] array contents.)
@@ -2185,7 +2203,8 @@ ri_BuildQueryKey(RI_QueryKey *key, const RI_ConstraintInfo *riinfo,
 	 * We assume struct RI_QueryKey contains no padding bytes, else we'd need
 	 * to use memset to clear them.
 	 */
-	if (constr_queryno != RI_PLAN_CHECK_LOOKUPPK_FROM_PK)
+	if (constr_queryno != RI_PLAN_CHECK_LOOKUPPK_FROM_PK &&
+		constr_queryno != RI_PLAN_CHECK_LOOKUPPK)
 		key->constr_id = riinfo->constraint_root_id;
 	else
 		key->constr_id = riinfo->constraint_id;
@@ -2464,10 +2483,17 @@ InvalidateConstraintCacheCallBack(Datum arg, int cacheid, uint32 hashvalue)
 	}
 }
 
+typedef enum RI_Plantype
+{
+	RI_PLAN_SQL = 0,
+	RI_PLAN_CHECK_FUNCTION
+} RI_Plantype;
+
 /* Query string or an equivalent name to show in the error CONTEXT. */
 typedef struct RIErrorCallbackArg
 {
 	const char *query;
+	RI_Plantype plantype;
 } RIErrorCallbackArg;
 
 /*
@@ -2497,7 +2523,17 @@ _RI_error_callback(void *arg)
 		internalerrquery(query);
 	}
 	else
-		errcontext("SQL statement \"%s\"", query);
+	{
+		switch (carg->plantype)
+		{
+			case RI_PLAN_SQL:
+				errcontext("SQL statement \"%s\"", query);
+				break;
+			case RI_PLAN_CHECK_FUNCTION:
+				errcontext("RI check function \"%s\"", query);
+				break;
+		}
+	}
 }
 
 /*
@@ -2734,13 +2770,386 @@ ri_SqlStringPlanFree(RI_Plan *plan)
 }
 
 /*
+ * Creates an RI_Plan to look a key up in the PK table.
+ *
+ * Not much to do beside initializing the expected callback members, because
+ * there is no query string to parse and plan.
+ */
+static void
+ri_LookupKeyInPkRelPlanCreate(RI_Plan *plan,
+							  const char *querystr, int nargs, Oid *paramtypes)
+{
+	Assert(querystr == NULL);
+	plan->plan_exec_func = ri_LookupKeyInPkRel;
+	plan->plan_exec_arg = NULL;
+	plan->plan_is_valid_func = ri_LookupKeyInPkRelPlanIsValid;
+	plan->plan_free_func = ri_LookupKeyInPkRelPlanFree;
+}
+
+/*
+ * get_fkey_unique_index
+ * 		Returns the unique index used by a supposedly foreign key constraint
+ */
+static Oid
+get_fkey_unique_index(Oid conoid)
+{
+	Oid			result = InvalidOid;
+	HeapTuple	tp;
+
+	tp = SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid));
+	if (HeapTupleIsValid(tp))
+	{
+		Form_pg_constraint contup = (Form_pg_constraint) GETSTRUCT(tp);
+
+		if (contup->contype == CONSTRAINT_FOREIGN)
+			result = contup->conindid;
+		ReleaseSysCache(tp);
+	}
+
+	if (!OidIsValid(result))
+		elog(ERROR, "unique index not found for foreign key constraint %u",
+			 conoid);
+
+	return result;
+}
+
+/*
+ * ri_CheckPermissions
+ * 		Check that the new user has permissions to look into the schema of
+ * 		and SELECT from 'query_rel'
+ *
+ * Provided for non-SQL implementors of an RI_Plan.
+ */
+static void
+ri_CheckPermissions(Relation query_rel)
+{
+	AclResult	aclresult;
+
+	/* USAGE on schema. */
+	aclresult = object_aclcheck(NamespaceRelationId,
+								RelationGetNamespace(query_rel),
+								GetUserId(), ACL_USAGE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, OBJECT_SCHEMA,
+					   get_namespace_name(RelationGetNamespace(query_rel)));
+
+	/* SELECT on relation. */
+	aclresult = pg_class_aclcheck(RelationGetRelid(query_rel), GetUserId(),
+								  ACL_SELECT);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, OBJECT_TABLE,
+					   RelationGetRelationName(query_rel));
+}
+
+/*
+ * This checks that the index key of the tuple specified in 'new_slot' matches
+ * the key that has already been found in the PK index relation 'idxrel'.
+ *
+ * Returns true if the index key of the tuple matches the existing index
+ * key, false otherwise.
+ */
+static bool
+recheck_matched_pk_tuple(Relation idxrel, ScanKeyData *skeys,
+						 TupleTableSlot *new_slot)
+{
+	IndexInfo *indexInfo = BuildIndexInfo(idxrel);
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+	bool		matched = true;
+
+	/* PK indexes never have these. */
+	Assert(indexInfo->ii_Expressions == NIL &&
+		   indexInfo->ii_ExclusionOps == NULL);
+
+	/* Form the index values and isnull flags given the table tuple. */
+	FormIndexDatum(indexInfo, new_slot, NULL, values, isnull);
+	for (int i = 0; i < indexInfo->ii_NumIndexKeyAttrs; i++)
+	{
+		ScanKeyData		*skey = &skeys[i];
+
+		/* A PK column can never be set to NULL. */
+		Assert(!isnull[i]);
+		if (!DatumGetBool(FunctionCall2Coll(&skey->sk_func,
+											skey->sk_collation,
+											skey->sk_argument,
+											values[i])))
+		{
+			matched = false;
+			break;
+		}
+	}
+
+	return matched;
+}
+
+/*
+ * Checks whether a tuple containing the given unique key given by pk_vals,
+ * pk_nulls exists in 'pk_rel'.  The key is looked up using the constraint's
+ * index given in plan->riinfo.
+ *
+ * If 'pk_rel' is a partitioned table, the check is performed on its leaf
+ * partition that would contain the key.
+ *
+ * The provided tuple is either the one being inserted into the referencing
+ * relation (fk_rel) or the one being deleted from the referenced relation
+ * (pk_rel).
+ */
+static int
+ri_LookupKeyInPkRel(struct RI_Plan *plan,
+					Relation fk_rel, Relation pk_rel,
+					Datum *pk_vals, char *pk_nulls,
+					Snapshot crosscheck_snapshot,
+					int limit, CmdType *last_stmt_cmdtype)
+{
+	const RI_ConstraintInfo *riinfo = plan->riinfo;
+	Oid			constr_id = riinfo->constraint_id;
+	Oid			idxoid;
+	Relation	idxrel;
+	Relation	leaf_pk_rel = NULL;
+	int			num_pk;
+	int			i;
+	int			tuples_processed = 0;
+	const Oid  *eq_oprs;
+	Datum		pk_values[INDEX_MAX_KEYS];
+	bool		pk_isnulls[INDEX_MAX_KEYS];
+	ScanKeyData skey[INDEX_MAX_KEYS];
+	IndexScanDesc	scan;
+	TupleTableSlot *outslot;
+	RIErrorCallbackArg ricallbackarg;
+	ErrorContextCallback rierrcontext;
+
+	/* We're effectively doing a CMD_SELECT below. */
+	*last_stmt_cmdtype = CMD_SELECT;
+
+	/*
+	 * Setup error traceback support for ereport()
+	 */
+	ricallbackarg.query = pstrdup("ri_LookupKeyInPkRel");
+	ricallbackarg.plantype = RI_PLAN_CHECK_FUNCTION;
+	rierrcontext.callback = _RI_error_callback;
+	rierrcontext.arg = &ricallbackarg;
+	rierrcontext.previous = error_context_stack;
+	error_context_stack = &rierrcontext;
+
+	/* XXX Maybe afterTriggerInvokeEvents() / AfterTriggerExecute() should? */
+	CHECK_FOR_INTERRUPTS();
+
+	ri_CheckPermissions(pk_rel);
+
+	/*
+	 * Choose the equality operators to use when scanning the PK index below.
+	 *
+	 * May need to cast the foreign key value (of the FK column's type) to
+	 * the corresponding PK column's type if the equality operator
+	 * demands it.
+	 */
+	if (plan->constr_queryno == RI_PLAN_CHECK_LOOKUPPK_FROM_PK)
+	{
+		/* Use PK = PK equality operator. */
+		eq_oprs = riinfo->pp_eq_oprs;
+
+		for (i = 0; i < riinfo->nkeys; i++)
+		{
+			if (pk_nulls[i] != 'n')
+			{
+				pk_isnulls[i] = false;
+				pk_values[i] = pk_vals[i];
+			}
+			else
+			{
+				Assert(false);
+			}
+		}
+	}
+	else
+	{
+		Assert(plan->constr_queryno == RI_PLAN_CHECK_LOOKUPPK);
+		/* Use PK = FK equality operator. */
+		eq_oprs = riinfo->pf_eq_oprs;
+
+		for (i = 0; i < riinfo->nkeys; i++)
+		{
+			if (pk_nulls[i] != 'n')
+			{
+				Oid		eq_opr = eq_oprs[i];
+				Oid		typeid = RIAttType(fk_rel, riinfo->fk_attnums[i]);
+				RI_CompareHashEntry *entry = ri_HashCompareOp(eq_opr, typeid);
+
+				pk_isnulls[i] = false;
+				pk_values[i] = pk_vals[i];
+				if (OidIsValid(entry->cast_func_finfo.fn_oid))
+				{
+					pk_values[i] = FunctionCall3(&entry->cast_func_finfo,
+												 pk_vals[i],
+												 Int32GetDatum(-1), /* typmod */
+												 BoolGetDatum(false)); /* implicit coercion */
+				}
+			}
+			else
+			{
+				Assert(false);
+			}
+		}
+	}
+
+	/*
+	 * Open the constraint index to be scanned.
+	 *
+	 * If the target table is partitioned, we must look up the leaf partition
+	 * and its corresponding unique index to search the keys in.
+	 */
+	idxoid = get_fkey_unique_index(constr_id);
+	if (pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		Oid		leaf_idxoid;
+		PartitionDirectory partdir;
+
+		/*
+		 * Pass the latest snapshot for omit_detached_snapshot so that any
+		 * detach-pending partitions are correctly omitted or included from
+		 * the considerations of this lookup.  The PartitionDesc machinery
+		 * that runs as part of this will need to use the snapshot to determine
+		 * whether to omit or include any detach-pending partition based on the
+		 * whether the pg_inherits row that marks it as detach-pending is
+		 * is visible to it or not, respectively.
+		 */
+		partdir = CreatePartitionDirectory(CurrentMemoryContext,
+										   GetLatestSnapshot());
+		leaf_pk_rel = ExecGetLeafPartitionForKey(partdir,
+												 pk_rel, riinfo->nkeys,
+												 riinfo->pk_attnums,
+												 pk_values, pk_isnulls,
+												 idxoid, RowShareLock,
+												 &leaf_idxoid);
+
+		/*
+		 * XXX - Would be nice if this could be saved across calls. Problem
+		 * with just putting it in RI_Plan.plan_exec_arg is that the RI_Plan
+		 * is cached for the session duration, whereas the PartitionDirectory
+		 * can't last past the transaction.
+		 */
+		DestroyPartitionDirectory(partdir);
+
+		/*
+		 * If no suitable leaf partition exists, neither can the key we're
+		 * looking for.
+		 */
+		if (leaf_pk_rel == NULL)
+			goto done;
+
+		pk_rel = leaf_pk_rel;
+		idxoid = leaf_idxoid;
+	}
+	idxrel = index_open(idxoid, RowShareLock);
+
+	/*
+	 * Set up ScanKeys for the index scan.  This is essentially how
+	 * ExecIndexBuildScanKeys() sets them up.
+	 */
+	num_pk = IndexRelationGetNumberOfKeyAttributes(idxrel);
+	for (i = 0; i < num_pk; i++)
+	{
+		int			pkattno = i + 1;
+		Oid			lefttype,
+					righttype;
+		Oid			operator = eq_oprs[i];
+		Oid			opfamily = idxrel->rd_opfamily[i];
+		int			strat;
+		RegProcedure regop = get_opcode(operator);
+
+		Assert(!pk_isnulls[i]);
+		get_op_opfamily_properties(operator, opfamily, false, &strat,
+								   &lefttype, &righttype);
+		ScanKeyEntryInitialize(&skey[i], 0, pkattno, strat, righttype,
+							   idxrel->rd_indcollation[i], regop,
+							   pk_values[i]);
+	}
+
+	Assert(ActiveSnapshotSet());
+	scan = index_beginscan(pk_rel, idxrel, GetActiveSnapshot(), NULL, num_pk, 0);
+
+	/* Install the ScanKeys. */
+	index_rescan(scan, skey, num_pk, NULL, 0);
+
+	/* Look for the tuple, and if found, try to lock it in key share mode. */
+	outslot = table_slot_create(pk_rel, NULL);
+	while (index_getnext_slot(scan, ForwardScanDirection, outslot))
+	{
+		bool	tuple_concurrently_updated;
+
+		/*
+		 * If we fail to lock the tuple for whatever reason, assume it doesn't
+		 * exist.  If the locked tuple is the one that was found to be updated
+		 * concurrently, retry.
+		 */
+		if (ExecLockTableTuple(pk_rel, &(outslot->tts_tid), outslot,
+							   GetActiveSnapshot(),
+							   GetCurrentCommandId(false),
+							   LockTupleKeyShare,
+							   LockWaitBlock,
+							   &tuple_concurrently_updated))
+		{
+			bool	matched = true;
+
+			/*
+			 * If the matched table tuple has been updated, check if the key is
+			 * still the same.
+			 *
+			 * This emulates EvalPlanQual() in the executor.
+			 */
+			if (tuple_concurrently_updated &&
+				!recheck_matched_pk_tuple(idxrel, skey, outslot))
+				matched = false;
+
+			if (matched)
+				tuples_processed = 1;
+		}
+
+		break;
+	}
+
+	index_endscan(scan);
+	ExecDropSingleTupleTableSlot(outslot);
+
+	/* Don't release lock until commit. */
+	index_close(idxrel, NoLock);
+
+	/* Close leaf partition relation if any. */
+	if (leaf_pk_rel)
+		table_close(leaf_pk_rel, NoLock);
+
+done:
+	/*
+	 * Pop the error context stack
+	 */
+	error_context_stack = rierrcontext.previous;
+
+	return tuples_processed;
+}
+
+static bool
+ri_LookupKeyInPkRelPlanIsValid(RI_Plan *plan)
+{
+	/* Never store anything that can be invalidated. */
+	return true;
+}
+
+static void
+ri_LookupKeyInPkRelPlanFree(RI_Plan *plan)
+{
+	/* Nothing to free. */
+}
+
+/*
  * Create an RI_Plan for a given RI check query and initialize the
  * plan callbacks and execution argument using the caller specified
  * function.
  */
 static RI_Plan *
-ri_PlanCreate(RI_PlanCreateFunc_type plan_create_func,
-			  const char *querystr, int nargs, Oid *paramtypes)
+ri_PlanCreate(const RI_ConstraintInfo *riinfo,
+			  RI_PlanCreateFunc_type plan_create_func,
+			  const char *querystr, int nargs, Oid *paramtypes,
+			  int constr_queryno)
 {
 	RI_Plan	   *plan;
 	MemoryContext plancxt,
@@ -2755,6 +3164,8 @@ ri_PlanCreate(RI_PlanCreateFunc_type plan_create_func,
 									ALLOCSET_SMALL_SIZES);
 	oldcxt = MemoryContextSwitchTo(plancxt);
 	plan = (RI_Plan *) palloc0(sizeof(*plan));
+	plan->riinfo = riinfo;
+	plan->constr_queryno = constr_queryno;
 	plan->plancxt = plancxt;
 	plan->nargs = nargs;
 	if (plan->nargs > 0)
@@ -2819,7 +3230,8 @@ ri_FreePlan(RI_Plan *plan)
  * Prepare execution plan for a query to enforce an RI restriction
  */
 static RI_Plan *
-ri_PlanCheck(RI_PlanCreateFunc_type plan_create_func,
+ri_PlanCheck(const RI_ConstraintInfo *riinfo,
+			 RI_PlanCreateFunc_type plan_create_func,
 			 const char *querystr, int nargs, Oid *argtypes,
 			 RI_QueryKey *qkey, Relation fk_rel, Relation pk_rel)
 {
@@ -2843,7 +3255,8 @@ ri_PlanCheck(RI_PlanCreateFunc_type plan_create_func,
 						   save_sec_context | SECURITY_LOCAL_USERID_CHANGE |
 						   SECURITY_NOFORCE_RLS);
 	/* Create the plan */
-	qplan = ri_PlanCreate(plan_create_func, querystr, nargs, argtypes);
+	qplan = ri_PlanCreate(riinfo, plan_create_func, querystr, nargs,
+						  argtypes, qkey->constr_queryno);
 
 	/* Restore UID and security context */
 	SetUserIdAndSecContext(save_userid, save_sec_context);
@@ -3488,7 +3901,10 @@ ri_CompareWithCast(Oid eq_opr, Oid typeid, Oid collid,
  * ri_HashCompareOp -
  *
  * See if we know how to compare two values, and create a new hash entry
- * if not.
+ * if not.  The entry contains the FmgrInfo of the equality operator function
+ * and that of the cast function, if one is needed to convert the right
+ * operand (whose type OID has been passed) before passing it to the equality
+ * function.
  */
 static RI_CompareHashEntry *
 ri_HashCompareOp(Oid eq_opr, Oid typeid)
@@ -3544,8 +3960,16 @@ ri_HashCompareOp(Oid eq_opr, Oid typeid)
 		 * moment since that will never be generated for implicit coercions.
 		 */
 		op_input_types(eq_opr, &lefttype, &righttype);
-		Assert(lefttype == righttype);
-		if (typeid == lefttype)
+
+		/*
+		 * Don't need to cast if the values that will be passed to the
+		 * operator will be of expected operand type(s).  The operator can be
+		 * cross-type (such as when called by ri_LookupKeyInPkRel()), in which
+		 * case, we only need the cast if the right operand value doesn't match
+		 * the type expected by the operator.
+		 */
+		if ((lefttype == righttype && typeid == lefttype) ||
+			(lefttype != righttype && typeid == righttype))
 			castfunc = InvalidOid;	/* simplest case */
 		else
 		{
