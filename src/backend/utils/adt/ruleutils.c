@@ -1809,7 +1809,7 @@ make_propgraphdef_labels(StringInfo buf, Oid elid, const char *elalias, Oid elre
 		Form_pg_propgraph_element_label pgelform = (Form_pg_propgraph_element_label) GETSTRUCT(tup);
 		const char *labelname;
 
-		labelname = get_propgraph_label_name(pgelform->pgellabelid);
+		labelname = get_propgraph_label_name(pgelform->pgellabelid, false);
 
 		if (strcmp(labelname, elalias) == 0)
 		{
@@ -1885,7 +1885,7 @@ make_propgraphdef_properties(StringInfo buf, Oid ellabelid, Oid elrelid)
 		expr = stringToNode(tmp);
 		pfree(tmp);
 
-		propname = get_propgraph_property_name(plpform->plppropid);
+		propname = get_propgraph_property_name(plpform->plppropid, false);
 
 		outlist = lappend(outlist, list_make2(makeString(propname), expr));
 	}
@@ -7871,7 +7871,7 @@ get_graph_label_expr(Node *label_expr, deparse_context *context)
 			{
 				GraphLabelRef *lref = (GraphLabelRef *) label_expr;
 
-				appendStringInfoString(buf, quote_identifier(get_propgraph_label_name(lref->labelid)));
+				appendStringInfoString(buf, quote_identifier(get_propgraph_label_name(lref->labelid, false)));
 				break;
 			}
 
@@ -11055,7 +11055,7 @@ get_rule_expr(Node *node, deparse_context *context,
 			{
 				GraphPropertyRef *gpr = (GraphPropertyRef *) node;
 
-				appendStringInfo(buf, "%s.%s", quote_identifier(gpr->elvarname), quote_identifier(get_propgraph_property_name(gpr->propid)));
+				appendStringInfo(buf, "%s.%s", quote_identifier(gpr->elvarname), quote_identifier(get_propgraph_property_name(gpr->propid, false)));
 				break;
 			}
 

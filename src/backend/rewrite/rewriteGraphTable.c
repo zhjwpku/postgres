@@ -962,7 +962,7 @@ get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf)
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_OBJECT),
 						 errmsg("can not find label \"%s\" in property graph \"%s\" for element type \"%s\"",
-								get_propgraph_label_name(labeloid),
+								get_propgraph_label_name(labeloid, false),
 								get_rel_name(propgraphid),
 								get_graph_elem_kind_name(pf->kind))));
 		}
@@ -1131,7 +1131,7 @@ replace_property_refs_mutator(Node *node, struct replace_property_refs_context *
 
 		if (!n)
 			elog(ERROR, "property \"%s\" of element variable \"%s\" not found",
-				 get_propgraph_property_name(gpr->propid), mapping_factor->variable);
+				 get_propgraph_property_name(gpr->propid, false), mapping_factor->variable);
 
 		return n;
 	}
