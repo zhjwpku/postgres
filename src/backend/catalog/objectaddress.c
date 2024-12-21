@@ -4070,8 +4070,12 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 
 				tup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(tup))
-					elog(ERROR, "cache lookup failed for property graph element %u",
-						 object->objectId);
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for property graph element %u",
+							 object->objectId);
+					break;
+				}
 
 				pgeform = (Form_pg_propgraph_element) GETSTRUCT(tup);
 
@@ -4118,7 +4122,7 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 
 				pgelform = (Form_pg_propgraph_element_label) GETSTRUCT(tuple);
 
-				appendStringInfo(&buffer, _("label %s of "), get_propgraph_label_name(pgelform->pgellabelid));
+				appendStringInfo(&buffer, _("label %s of "), get_propgraph_label_name(pgelform->pgellabelid, false));
 				ObjectAddressSet(oa, PropgraphElementRelationId, pgelform->pgelelid);
 				appendStringInfoString(&buffer, getObjectDescription(&oa, false));
 
@@ -4193,7 +4197,7 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 
 				plpform = (Form_pg_propgraph_label_property) GETSTRUCT(tuple);
 
-				appendStringInfo(&buffer, _("property %s of "), get_propgraph_property_name(plpform->plppropid));
+				appendStringInfo(&buffer, _("property %s of "), get_propgraph_property_name(plpform->plppropid, false));
 				ObjectAddressSet(oa, PropgraphElementLabelRelationId, plpform->plpellabelid);
 				appendStringInfoString(&buffer, getObjectDescription(&oa, false));
 
@@ -6174,16 +6178,46 @@ getObjectIdentityParts(const ObjectAddress *object,
 			}
 
 		case PropgraphElementRelationId:
-			appendStringInfo(&buffer, "%u TODO", object->objectId);
-			break;
+			{
+				char	   *elemname;
+
+				elemname = get_propgraph_element_alias_name(object->objectId, missing_ok);
+				if (elemname)
+				{
+					appendStringInfoString(&buffer, quote_identifier(elemname));
+					if (objname)
+						*objname = list_make1(elemname);
+				}
+				break;
+			}
 
 		case PropgraphLabelRelationId:
-			appendStringInfo(&buffer, "%u TODO", object->objectId);
-			break;
+			{
+				char	   *labelname;
+
+				labelname = get_propgraph_label_name(object->objectId, missing_ok);
+				if (labelname)
+				{
+					appendStringInfoString(&buffer, quote_identifier(labelname));
+					if (objname)
+						*objname = list_make1(labelname);
+				}
+				break;
+			}
 
 		case PropgraphPropertyRelationId:
-			appendStringInfo(&buffer, "%u TODO", object->objectId);
-			break;
+			{
+				char	   *propname;
+
+				propname = get_propgraph_property_name(object->objectId, missing_ok);
+				if (propname)
+				{
+					appendStringInfoString(&buffer, quote_identifier(propname));
+					if (objname)
+						*objname = list_make1(propname);
+				}
+				break;
+			}
 
 		case PublicationRelationId:
 			{

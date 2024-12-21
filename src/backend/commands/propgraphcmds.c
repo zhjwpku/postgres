@@ -1166,7 +1166,7 @@ check_element_properties(Oid peoid)
 						ereport(ERROR,
 								errcode(ERRCODE_SYNTAX_ERROR),
 								errmsg("element \"%s\" property \"%s\" expression mismatch: %s vs. %s",
-									   NameStr(elform->pgealias), get_propgraph_property_name(propoid), dpa, dpb),
+									   NameStr(elform->pgealias), get_propgraph_property_name(propoid, false), dpa, dpb),
 								errdetail("In a property graph element, a property of the same name has to have the same expression in each label."));
 
 						ReleaseSysCache(tuple3);
@@ -1283,7 +1283,7 @@ check_element_label_properties(Oid ellabeloid)
 	if (list_length(refprops) != list_length(myprops))
 		ereport(ERROR,
 				errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				errmsg("mismatching number of properties in definition of label \"%s\"", get_propgraph_label_name(labelid)));
+				errmsg("mismatching number of properties in definition of label \"%s\"", get_propgraph_label_name(labelid, false)));
 
 	diff1 = list_difference(myprops, refprops);
 	diff2 = list_difference(refprops, myprops);
@@ -1291,7 +1291,7 @@ check_element_label_properties(Oid ellabeloid)
 	if (diff1 || diff2)
 		ereport(ERROR,
 				errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				errmsg("mismatching properties names in definition of label \"%s\"", get_propgraph_label_name(labelid)));
+				errmsg("mismatching properties names in definition of label \"%s\"", get_propgraph_label_name(labelid, false)));
 }
 
 /*
@@ -1844,7 +1844,7 @@ get_element_label_property_names(Oid ellabeloid)
 	{
 		Form_pg_propgraph_label_property plpform = (Form_pg_propgraph_label_property) GETSTRUCT(tuple);
 
-		result = lappend(result, makeString(get_propgraph_property_name(plpform->plppropid)));
+		result = lappend(result, makeString(get_propgraph_property_name(plpform->plppropid, false)));
 	}
 
 	systable_endscan(scan);
