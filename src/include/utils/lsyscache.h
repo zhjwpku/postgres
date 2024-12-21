@@ -206,8 +206,9 @@ extern char *get_publication_name(Oid pubid, bool missing_ok);
 extern Oid	get_subscription_oid(const char *subname, bool missing_ok);
 extern char *get_subscription_name(Oid subid, bool missing_ok);
 
-extern char *get_propgraph_label_name(Oid labeloid);
-extern char *get_propgraph_property_name(Oid propoid);
+extern char *get_propgraph_element_alias_name(Oid elemoid, bool missing_ok);
+extern char *get_propgraph_label_name(Oid labeloid, bool missing_ok);
+extern char *get_propgraph_property_name(Oid propoid, bool missing_ok);
 
 #define type_is_array(typid)  (get_element_type(typid) != InvalidOid)
 /* type_is_array_domain accepts both plain arrays and domains over arrays */

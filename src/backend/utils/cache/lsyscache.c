@@ -32,6 +32,7 @@
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_propgraph_element.h"
 #include "catalog/pg_propgraph_label.h"
 #include "catalog/pg_propgraph_property.h"
 #include "catalog/pg_publication.h"
@@ -3718,7 +3719,26 @@ get_subscription_name(Oid subid, bool missing_ok)
 }
 
 char *
-get_propgraph_label_name(Oid labeloid)
+get_propgraph_element_alias_name(Oid elemoid, bool missing_ok)
+{
+	HeapTuple	tuple;
+	char	   *elemname;
+
+	tuple = SearchSysCache1(PROPGRAPHELOID, elemoid);
+	if (!tuple)
+	{
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for element %u", elemoid);
+		return NULL;
+	}
+	elemname = pstrdup(NameStr(((Form_pg_propgraph_element) GETSTRUCT(tuple))->pgealias));
+	ReleaseSysCache(tuple);
+
+	return elemname;
+}
+
+char *
+get_propgraph_label_name(Oid labeloid, bool missing_ok)
 {
 	HeapTuple	tuple;
 	char	   *labelname;
@@ -3726,7 +3746,8 @@ get_propgraph_label_name(Oid labeloid)
 	tuple = SearchSysCache1(PROPGRAPHLABELOID, labeloid);
 	if (!tuple)
 	{
-		elog(ERROR, "cache lookup failed for label %u", labeloid);
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for label %u", labeloid);
 		return NULL;
 	}
 	labelname = pstrdup(NameStr(((Form_pg_propgraph_label) GETSTRUCT(tuple))->pgllabel));
@@ -3736,7 +3757,7 @@ get_propgraph_label_name(Oid labeloid)
 }
 
 char *
-get_propgraph_property_name(Oid propoid)
+get_propgraph_property_name(Oid propoid, bool missing_ok)
 {
 	HeapTuple	tuple;
 	char	   *propname;
@@ -3744,7 +3765,8 @@ get_propgraph_property_name(Oid propoid)
 	tuple = SearchSysCache1(PROPGRAPHPROPOID, propoid);
 	if (!tuple)
 	{
-		elog(ERROR, "cache lookup failed for property %u", propoid);
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for property %u", propoid);
 		return NULL;
 	}
 	propname = pstrdup(NameStr(((Form_pg_propgraph_property) GETSTRUCT(tuple))->pgpname));
