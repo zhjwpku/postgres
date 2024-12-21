@@ -29,6 +29,11 @@ CREATE PROPERTY GRAPH g2
             DESTINATION KEY (x, t) REFERENCES t3 (x, y)
     );
 
+-- test object addresses
+SELECT pg_identify_object_as_address('pg_propgraph_element'::regclass, oid, 0) FROM pg_propgraph_element;
+SELECT pg_identify_object_as_address('pg_propgraph_label'::regclass, oid, 0) FROM pg_propgraph_label;
+SELECT pg_identify_object_as_address('pg_propgraph_property'::regclass, oid, 0) FROM pg_propgraph_property;
+
 -- test dependencies/object descriptions
 
 DROP TABLE t1;  -- fail
