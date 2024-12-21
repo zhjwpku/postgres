@@ -22,6 +22,42 @@ CREATE PROPERTY GRAPH g2
             SOURCE KEY (a) REFERENCES t1 (a)
             DESTINATION KEY (x, t) REFERENCES t3 (x, y)
     );
+-- test object addresses
+SELECT pg_identify_object_as_address('pg_propgraph_element'::regclass, oid, 0) FROM pg_propgraph_element;
+   pg_identify_object_as_address    
+------------------------------------
+ ("property graph element",{t1},{})
+ ("property graph element",{t2},{})
+ ("property graph element",{t3},{})
+ ("property graph element",{e1},{})
+ ("property graph element",{e2},{})
+(5 rows)
+
+SELECT pg_identify_object_as_address('pg_propgraph_label'::regclass, oid, 0) FROM pg_propgraph_label;
+   pg_identify_object_as_address    
+------------------------------------
+ ("property graph label",{t1},{})
+ ("property graph label",{t2},{})
+ ("property graph label",{t3l1},{})
+ ("property graph label",{t3l2},{})
+ ("property graph label",{e1},{})
+ ("property graph label",{e2},{})
+(6 rows)
+
+SELECT pg_identify_object_as_address('pg_propgraph_property'::regclass, oid, 0) FROM pg_propgraph_property;
+   pg_identify_object_as_address    
+------------------------------------
+ ("property graph property",{a},{})
+ ("property graph property",{b},{})
+ ("property graph property",{i},{})
+ ("property graph property",{j},{})
+ ("property graph property",{k},{})
+ ("property graph property",{x},{})
+ ("property graph property",{y},{})
+ ("property graph property",{z},{})
+ ("property graph property",{t},{})
+(9 rows)
+
 -- test dependencies/object descriptions
 DROP TABLE t1;  -- fail
 ERROR:  cannot drop table t1 because other objects depend on it
