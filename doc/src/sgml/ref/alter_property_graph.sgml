@@ -99,7 +99,7 @@ ALTER PROPERTY GRAPH [ IF EXISTS ] <replaceable class="parameter">name</replacea
      <term><literal>ALTER {VERTEX|NODE|EDGE|RELATIONSHIP} TABLE ... DROP LABEL</literal></term>
      <listitem>
       <para>
-       This form removes a new label from an existing vertex or edge table.
+       This form removes a label from an existing vertex or edge table.
       </para>
      </listitem>
     </varlistentry>

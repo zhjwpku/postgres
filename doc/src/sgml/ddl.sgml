@@ -5364,14 +5364,14 @@ EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
    relational databases.  PostgreSQL implements SQL/PGQ<footnote><para>Here,
    PGQ stands for <quote>property graph query</quote>.  In the jargon of graph
    databases, <quote>property graph</quote> is normally abbreviated as PG,
-   which is clearly confusing for practioners of PostgreSQL, also usually
+   which is clearly confusing for practitioners of PostgreSQL, also usually
    abbreviated as PG.</para></footnote>, which is part of the SQL standard,
    where a property graph is defined as a kind of read-only view over
    relational tables.  So the actual data is still in tables or table-like
    objects, but is exposed as a graph for graph querying operations.  (This is
    in contrast to native graph databases, where the data is stored directly in
    a graph structure.)  Underneath, both relational queries and graph queries
-   use the same query planning and execution infrastucture, and in fact
+   use the same query planning and execution infrastructure, and in fact
    relational and graph queries can be combined and mixed in single queries.
   </para>
 
@@ -5452,7 +5452,7 @@ CREATE PROPERTY GRAPH myshop
    This graph could then be queried like this:
 <programlisting>
 -- get list of customers active today
-SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders]->(o IS orders WHERE ordered_when = current_date) COLUMNS (c.name AS customer_name));
+SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders]->(o IS orders WHERE o.ordered_when = current_date) COLUMNS (c.name AS customer_name));
 </programlisting>
    corresponding approximately to this relational query:
 <programlisting>
@@ -5463,10 +5463,10 @@ SELECT customers.name FROM customers JOIN customer_orders USING (customer_id) JO
 
   <para>
    The above definition requires that all tables have primary keys and that
-   for each edge there is an appropriate foreign key.  Otherwise, additional
-   clauses have to be specified to identify the key columns.  For example,
-   this would be the fully verbose definition that does not rely on primary
-   and foreign keys:
+   each edge has an appropriate foreign key for both the source and destination
+   vertices, respectively.  Otherwise, additional clauses have to be specified
+   to identify the key columns.  For example, this would be the fully verbose
+   definition that does not rely on primary and foreign keys:
 <programlisting>
 CREATE PROPERTY GRAPH myshop
     VERTEX TABLES (
@@ -5488,7 +5488,7 @@ CREATE PROPERTY GRAPH myshop
   <para>
    As mentioned above, by default, the names of the tables and columns are
    exposed as labels and properties, respectively.  The clauses <literal>IS
-   customer</literal>, <literal>IS order</literal>, etc. in the
+   customers</literal>, <literal>IS orders</literal>, etc. in the
    <literal>MATCH</literal> clause in fact refer to labels, not table names.
   </para>
 
@@ -5504,19 +5504,21 @@ CREATE PROPERTY GRAPH myshop
     VERTEX TABLES (
         products LABEL product,
         customers LABEL customer,
-        orders LABEL order
+        orders LABEL orders
     )
     EDGE TABLES (
         order_items SOURCE orders DESTINATION products LABEL contains,
         customer_orders SOURCE customers DESTINATION orders LABEL has
     );
 </programlisting>
+
+  (We explicitly set the LABEL as <literal>orders</literal> instead of <literal>order</literal> because <literal>order</literal> is a reserved keyword.)
   </para>
 
   <para>
    With this definition, we can write a query like this:
 <programlisting>
-SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c:customer)-[:has]->(o:order WHERE ordered_when = current_date) COLUMNS (c.name AS customer_name));
+SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c:customer)-[:has]->(o:orders WHERE o.ordered_when = current_date) COLUMNS (c.name AS customer_name));
 </programlisting>
    With the new labels and using the colon instead of <literal>IS</literal>,
    which are equivalent, the <literal>MATCH</literal> clause is now more
@@ -5539,7 +5541,7 @@ CREATE PROPERTY GRAPH myshop
     VERTEX TABLES (
         products LABEL product,
         customers LABEL customer LABEL person PROPERTIES (name),
-        orders LABEL order,
+        orders LABEL orders,
         employees LABEL employee LABEL person PROPERTIES (employee_name AS name)
     )
     EDGE TABLES (
