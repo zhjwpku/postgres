@@ -96,7 +96,7 @@ DROP PROPERTY GRAPH g1;
    <command>DROP PROPERTY GRAPH</command> conforms to ISO/IEC 9075-16
    (SQL/PGQ), except that the standard only allows one property graph to be
    dropped per command, and apart from the <literal>IF EXISTS</literal>
-   option, which is a <productname>PostgreSQL</productname> extension..
+   option, which is a <productname>PostgreSQL</productname> extension.
   </para>
  </refsect1>
 

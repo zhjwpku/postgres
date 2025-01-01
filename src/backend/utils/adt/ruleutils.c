@@ -1770,7 +1770,7 @@ make_propgraphdef_elements(StringInfo buf, Oid pgrelid, char pgekind)
 
 /*
  * Generates label and properties list.  Pass in the element OID, the element
- * alias, and the graph relation OID.  Result is append to buf.
+ * alias, and the element table OID.  Result is append to buf.
  */
 static void
 make_propgraphdef_labels(StringInfo buf, Oid elid, const char *elalias, Oid elrelid)
@@ -1845,8 +1845,8 @@ propdata_by_name_cmp(const ListCell *a, const ListCell *b)
 
 /*
  * Generates element table properties clause (PROPERTIES (...) or NO
- * PROPERTIES).  Pass in label ODI and element table OID.  Result is appended
- * to buf.
+ * PROPERTIES).  Pass in element label OID and element table OID.  Result is
+ * appended to buf.
  */
 static void
 make_propgraphdef_properties(StringInfo buf, Oid ellabelid, Oid elrelid)

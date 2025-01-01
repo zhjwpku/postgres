@@ -4227,7 +4227,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4346,7 +4346,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4430,7 +4430,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4461,7 +4461,7 @@ ORDER BY c.ordinal_position;
   <title><literal>pg_element_table_properties</literal></title>
 
   <para>
-   The view <literal>pg_element_table_labels</literal> shows the definitions
+   The view <literal>pg_element_table_properties</literal> shows the definitions
    of the properties for the element tables of property graphs defined in the
    current database.  Only those property graphs are shown that the current
    user has access to (by way of being the owner or having some privilege).
@@ -4505,7 +4505,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4589,7 +4589,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4700,7 +4700,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4774,7 +4774,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4839,7 +4839,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -5255,7 +5255,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
     </tbody>
