@@ -4227,7 +4227,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4346,7 +4346,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4430,7 +4430,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4505,7 +4505,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4589,7 +4589,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4700,7 +4700,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4774,7 +4774,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -4839,7 +4839,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
 
@@ -5255,7 +5255,7 @@ ORDER BY c.ordinal_position;
        <structfield>property_graph_name</structfield> <type>sql_identifier</type>
       </para>
       <para>
-       Name of the property_graph
+       Name of the property graph
       </para></entry>
      </row>
     </tbody>

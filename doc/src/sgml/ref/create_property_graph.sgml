@@ -151,7 +151,7 @@ CREATE [ TEMP | TEMPORARY ] PROPERTY GRAPH <replaceable class="parameter">name</
     <listitem>
      <para>
       The vertex tables that the edge table is linked to.  These refer to the
-      aliases of a the vertex table.
+      aliases of the source and destination vertex tables respectively.
      </para>
     </listitem>
    </varlistentry>
