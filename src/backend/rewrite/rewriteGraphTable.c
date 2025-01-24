@@ -142,7 +142,7 @@ rewriteGraphTable(Query *parsetree, int rt_index)
 }
 
 /*
- * Generate queries represeting the given path pattern applied to the given
+ * Generate queries representing the given path pattern applied to the given
  * property graph.
  *
  * A path pattern consists of one or more element patterns. Each of the element
@@ -154,7 +154,7 @@ rewriteGraphTable(Query *parsetree, int rt_index)
  * queries is returned.
  *
  * Assuming that the numbering starts at 0, every element pattern at an even
- * numbered position in the path is a vertex pattern. Every element in even
+ * numbered position in the path is a vertex pattern. Every element at an odd
  * numbered position is an edge pattern. Thus every even numbered element is a
  * vertex table and odd numbered element is an edge table. An edge connects two
  * vertices identified by the source and destination keys respectively. The
@@ -339,6 +339,8 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 
 /*
  * Recursive workhorse function of generate_queries_for_path_pattern().
+ *
+ * `elempos` is position of the element pattern in the path pattern.
  */
 static List *
 generate_queries_for_path_pattern_recurse(RangeTblEntry *rte, List *pathqueries, List *cur_path, List *path_elem_lists, int elempos)
@@ -546,12 +548,8 @@ generate_query_for_empty_path_pattern(RangeTblEntry *rte)
 	Query	   *query = makeNode(Query);
 
 	query->commandType = CMD_SELECT;
-
-
 	query->rtable = NIL;
 	query->rteperminfos = NIL;
-
-
 	query->jointree = makeFromExpr(NIL, (Node *) makeBoolConst(false, false));
 
 	/*
@@ -713,10 +711,8 @@ generate_setop_from_pathqueries(List *pathqueries, List **rtable, List **targetl
 }
 
 /*
- * Construct a graph_path_element object for the graph element given by `elemoid`
- * statisfied by the graph element pattern `gep`.
- *
- * 'elempos` is the position of given element pattern in the path pattern.
+ * Construct a path_element object for the graph element given by `elemoid`
+ * statisfied by the path factor `pf`.
  *
  * If the type of graph element does not fit the element pattern kind, the
  * function returns NULL.
@@ -871,16 +867,14 @@ get_labels_for_expr(Oid propgraphid, Node *labelexpr)
 }
 
 /*
- * Given a graph element pattern `gep`, return a list of all the graph elements
- * that satisfy the graph pattern.
+ * Given a path factor `pf`, return a list of all the graph elements that
+ * satisfy the graph pattern.
  *
  * First we find all the graph labels that satisfy the label expression in
- * graph element pattern. Each label has associated with one or more graph
- * elements. A union of all such elements satisfies the element pattern. The
- * returned list contains one graph_path_element object representing each of
- * these elements respectively.
- *
- * `elempos` is position of the element pattern in the path pattern.
+ * path factor. Each label has associated with one or more graph elements.
+ * A union of all such elements satisfies the element pattern. The returned
+ * list contains one graph_path_element object representing each of these
+ * elements respectively.
  */
 static List *
 get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf)
