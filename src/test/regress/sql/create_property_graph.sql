@@ -248,6 +248,7 @@ SELECT pg_get_propgraphdef('pg_type'::regclass);  -- error
 \a\t
 
 \dG g1
+\dGx g1
 
 -- TODO
 \d g1

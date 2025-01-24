@@ -651,6 +651,14 @@ ERROR:  "pg_type" is not a property graph
  create_property_graph_tests | g1   | property graph | regress_graph_user1
 (1 row)
 
+\dGx g1
+List of relations
+-[ RECORD 1 ]-----------------------
+Schema | create_property_graph_tests
+Name   | g1
+Type   | property graph
+Owner  | regress_graph_user1
+
 -- TODO
 \d g1
 Property graph "create_property_graph_tests.g1"
