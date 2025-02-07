@@ -4257,6 +4257,9 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 			else if (showForeign)
 				pg_log_error("Did not find any foreign tables named \"%s\".",
 							 pattern);
+			else if (showPropGraphs)
+				pg_log_error("Did not find any property graphs named \"%s\".",
+							 pattern);
 			else				/* should not get here */
 				pg_log_error_internal("Did not find any ??? named \"%s\".",
 									  pattern);
@@ -4277,6 +4280,8 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 				pg_log_error("Did not find any sequences.");
 			else if (showForeign)
 				pg_log_error("Did not find any foreign tables.");
+			else if (showPropGraphs)
+				pg_log_error("Did not find any property graphs.");
 			else				/* should not get here */
 				pg_log_error_internal("Did not find any ??? relations.");
 		}
