@@ -645,7 +645,7 @@ SELECT pg_get_propgraphdef('pg_type'::regclass);  -- error
 ERROR:  "pg_type" is not a property graph
 \a\t
 \dG g1
-                             List of relations
+                          List of property graphs
            Schema            | Name |      Type      |        Owner        
 -----------------------------+------+----------------+---------------------
  create_property_graph_tests | g1   | property graph | regress_graph_user1
