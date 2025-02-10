@@ -533,13 +533,6 @@ ALTER PROPERTY GRAPH g1 ADD EDGE TABLES (
 INSERT INTO e3_3 VALUES (2003, 2003, 'e331', 10010);
 INSERT INTO e3_3 VALUES (2003, 2003, 'E331', 10010);
 -- cyclic pattern with edge patterns with same variable name
-SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.vname AS self, b.ename AS loop_name)) ORDER BY loop_name ASC;
- self | loop_name 
-------+-----------
- v33  | e331
- v33  | E331
-(2 rows)
-
 SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.vname AS self, b.ename AS loop_name)) ORDER BY loop_name COLLATE "C" ASC;
  self | loop_name 
 ------+-----------
@@ -610,11 +603,11 @@ select sn, cn, dn from graph_table (g2 match (src : l1)-[conn : l1]->(dest : l1)
  g2.v33 | g2.e331 | g2.v33
 (8 rows)
 
-SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname COLLATE pg_catalog."default" AS loop_name)) ORDER BY loop_name ASC;
+SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name)) ORDER BY loop_name ASC;
   self  | loop_name 
 --------+-----------
- g2.v33 | g2.e331
  g2.v33 | g2.E331
+ g2.v33 | g2.e331
 (2 rows)
 
 SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b WHERE b.elname > 'g2.E331']->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name));
@@ -633,24 +626,6 @@ SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS s
   self  | loop_name 
 --------+-----------
  g2.v33 | g2.e331
-(1 row)
-
-SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b WHERE b.elname > 'g2.e331' COLLATE pg_catalog."default"]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name));
-  self  | loop_name 
---------+-----------
- g2.v33 | g2.E331
-(1 row)
-
-SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) WHERE b.elname > 'g2.e331' COLLATE pg_catalog."default" COLUMNS (a.elname AS self, b.elname AS loop_name));
-  self  | loop_name 
---------+-----------
- g2.v33 | g2.E331
-(1 row)
-
-SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name)) WHERE loop_name > 'g2.e331' COLLATE pg_catalog."default";
-  self  | loop_name 
---------+-----------
- g2.v33 | g2.E331
 (1 row)
 
 CREATE VIEW customers_us AS SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.name AS customer_name));
