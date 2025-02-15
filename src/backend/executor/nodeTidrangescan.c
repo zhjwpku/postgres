@@ -18,6 +18,7 @@
 #include "access/sysattr.h"
 #include "access/tableam.h"
 #include "catalog/pg_operator.h"
+#include "executor/execScan.h"
 #include "executor/executor.h"
 #include "executor/nodeTidrangescan.h"
 #include "nodes/nodeFuncs.h"
@@ -279,8 +280,10 @@ TidRangeRecheck(TidRangeScanState *node, TupleTableSlot *slot)
  *		ExecTidRangeScan(node)
  *
  *		Scans the relation using tids and returns the next qualifying tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
+ *		This variant is used when there is no es_eqp_active, no qual
+ *		and no projection.  Passing const-NULLs for these to ExecScanExtended
+ *		allows the compiler to eliminate the additional code that would
+ *		ordinarily be required for the evaluation of these.
  *
  *		Conditions:
  *		  -- the "cursor" maintained by the AMI is positioned at the tuple
@@ -292,6 +295,89 @@ TidRangeRecheck(TidRangeScanState *node, TupleTableSlot *slot)
  */
 static TupleTableSlot *
 ExecTidRangeScan(PlanState *pstate)
+{
+	TidRangeScanState *node = castNode(TidRangeScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) TidRangeNext,
+							(ExecScanRecheckMtd) TidRangeRecheck,
+							NULL,
+							NULL,
+							NULL);
+}
+
+/*
+ * Variant of ExecTidRangeScan() but when qual evaluation is required.
+ */
+static TupleTableSlot *
+ExecTidRangeScanWithQual(PlanState *pstate)
+{
+	TidRangeScanState *node = castNode(TidRangeScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) TidRangeNext,
+							(ExecScanRecheckMtd) TidRangeRecheck,
+							NULL,
+							pstate->qual,
+							NULL);
+}
+
+/*
+ * Variant of ExecTidRangeScan() but when projection is required.
+ */
+static TupleTableSlot *
+ExecTidRangeScanWithProject(PlanState *pstate)
+{
+	TidRangeScanState *node = castNode(TidRangeScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) TidRangeNext,
+							(ExecScanRecheckMtd) TidRangeRecheck,
+							NULL,
+							NULL,
+							pstate->ps_ProjInfo);
+}
+
+/*
+ * Variant of ExecTidRangeScan() but when qual evaluation and projection
+ * are required.
+ */
+static TupleTableSlot *
+ExecTidRangeScanWithQualProject(PlanState *pstate)
+{
+	TidRangeScanState *node = castNode(TidRangeScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) TidRangeNext,
+							(ExecScanRecheckMtd) TidRangeRecheck,
+							NULL,
+							pstate->qual,
+							pstate->ps_ProjInfo);
+}
+
+/*
+ * Variant of ExecTidRangeScan for when EPQ evaluation is required.  We don't
+ * bother adding variants of this for with/without qual and projection as
+ * EPQ doesn't seem as exciting a case to optimize for.
+ */
+static TupleTableSlot *
+ExecTidRangeScanEPQ(PlanState *pstate)
 {
 	TidRangeScanState *node = castNode(TidRangeScanState, pstate);
 
@@ -355,7 +441,6 @@ ExecInitTidRangeScan(TidRangeScan *node, EState *estate, int eflags)
 	tidrangestate = makeNode(TidRangeScanState);
 	tidrangestate->ss.ps.plan = (Plan *) node;
 	tidrangestate->ss.ps.state = estate;
-	tidrangestate->ss.ps.ExecProcNode = ExecTidRangeScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -397,6 +482,28 @@ ExecInitTidRangeScan(TidRangeScan *node, EState *estate, int eflags)
 		ExecInitQual(node->scan.plan.qual, (PlanState *) tidrangestate);
 
 	TidExprListCreate(tidrangestate);
+
+	/*
+	 * When EvalPlanQual() is not in use, assign ExecProcNode for this node
+	 * based on the presence of qual and projection. Each ExecTidRangeScan*()
+	 * variant is optimized for a specific combination of these conditions.
+	 */
+	if (tidrangestate->ss.ps.state->es_epq_active != NULL)
+		tidrangestate->ss.ps.ExecProcNode = ExecTidRangeScanEPQ;
+	else if (tidrangestate->ss.ps.qual == NULL)
+	{
+		if (tidrangestate->ss.ps.ps_ProjInfo == NULL)
+			tidrangestate->ss.ps.ExecProcNode = ExecTidRangeScan;
+		else
+			tidrangestate->ss.ps.ExecProcNode = ExecTidRangeScanWithProject;
+	}
+	else
+	{
+		if (tidrangestate->ss.ps.ps_ProjInfo == NULL)
+			tidrangestate->ss.ps.ExecProcNode = ExecTidRangeScanWithQual;
+		else
+			tidrangestate->ss.ps.ExecProcNode = ExecTidRangeScanWithQualProject;
+	}
 
 	/*
 	 * all done.
