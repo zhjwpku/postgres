@@ -922,19 +922,16 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 	Oid			exprtypid;
 	int32		exprtypmod;
 	Oid			exprcollation;
-	Oid			proptypid;
-	int32		proptypmod;
-	Oid			propcollation;
 
 	exprtypid = exprType((const Node *) expr);
-	exprcollation = exprCollation((const Node *) expr);
 	exprtypmod = exprTypmod((const Node *) expr);
+	exprcollation = exprCollation((const Node *) expr);
 
 	/*
 	 * Insert into pg_propgraph_property if not already existing.
 	 */
 	propoid = GetSysCacheOid2(PROPGRAPHPROPNAME, Anum_pg_propgraph_property_oid, ObjectIdGetDatum(graphid), CStringGetDatum(propname));
-	if (!propoid)
+	if (!OidIsValid(propoid))
 	{
 		Relation	rel;
 		NameData	propnamedata;
@@ -944,10 +941,6 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 		ObjectAddress myself;
 		ObjectAddress referenced;
 
-		proptypid = exprtypid;
-		proptypmod = exprtypmod;
-		propcollation = exprcollation;
-
 		rel = table_open(PropgraphPropertyRelationId, RowExclusiveLock);
 
 		propoid = GetNewOidWithIndex(rel, PropgraphPropertyObjectIndexId, Anum_pg_propgraph_property_oid);
@@ -955,9 +948,9 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 		values[Anum_pg_propgraph_property_pgppgid - 1] = ObjectIdGetDatum(graphid);
 		namestrcpy(&propnamedata, propname);
 		values[Anum_pg_propgraph_property_pgpname - 1] = NameGetDatum(&propnamedata);
-		values[Anum_pg_propgraph_property_pgptypid - 1] = ObjectIdGetDatum(proptypid);
-		values[Anum_pg_propgraph_property_pgptypmod - 1] = Int32GetDatum(proptypmod);
-		values[Anum_pg_propgraph_property_pgpcollation - 1] = ObjectIdGetDatum(propcollation);
+		values[Anum_pg_propgraph_property_pgptypid - 1] = ObjectIdGetDatum(exprtypid);
+		values[Anum_pg_propgraph_property_pgptypmod - 1] = Int32GetDatum(exprtypmod);
+		values[Anum_pg_propgraph_property_pgpcollation - 1] = ObjectIdGetDatum(exprcollation);
 
 		tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
 		CatalogTupleInsert(rel, tup);
@@ -967,7 +960,7 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 
 		ObjectAddressSet(referenced, RelationRelationId, graphid);
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_AUTO);
-		ObjectAddressSet(referenced, TypeRelationId, proptypid);
+		ObjectAddressSet(referenced, TypeRelationId, exprtypid);
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
 		table_close(rel, NoLock);
@@ -976,51 +969,53 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 	{
 		HeapTuple	pgptup = SearchSysCache1(PROPGRAPHPROPOID, ObjectIdGetDatum(propoid));
 		Form_pg_propgraph_property pgpform = (Form_pg_propgraph_property) GETSTRUCT(pgptup);
+		Oid			proptypid = pgpform->pgptypid;
+		int32		proptypmod = pgpform->pgptypmod;
+		Oid			propcollation = pgpform->pgpcollation;
 
-		proptypid = pgpform->pgptypid;
-		proptypmod = pgpform->pgptypmod;
-		propcollation = pgpform->pgpcollation;
 		ReleaseSysCache(pgptup);
-	}
 
-	/*
-	 * Check that in the graph, all properties with the same name have the
-	 * same type (independent of which label they are on).  (See SQL/PGQ
-	 * subclause "Consistency check of a tabular property graph descriptor".)
-	 */
-	if (proptypid != exprtypid)
-	{
-		ereport(ERROR,
-				errcode(ERRCODE_SYNTAX_ERROR),
-				errmsg("property \"%s\" data type mismatch: %s vs. %s",
-					   propname, format_type_be(proptypid), format_type_be(exprtypid)),
-				errdetail("In a property graph, a property of the same name has to have the same data type in each label."));
-	}
+		/*
+		 * Check that in the graph, all properties with the same name have the
+		 * same type (independent of which label they are on).  (See SQL/PGQ
+		 * subclause "Consistency check of a tabular property graph
+		 * descriptor".)
+		 */
+		if (proptypid != exprtypid)
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("property \"%s\" data type mismatch: %s vs. %s",
+						   propname, format_type_be(proptypid), format_type_be(exprtypid)),
+					errdetail("In a property graph, a property of the same name has to have the same data type in each label."));
+		}
 
-	/* Similarly for collation */
-	if (propcollation != exprcollation)
-	{
-		ereport(ERROR,
-				errcode(ERRCODE_SYNTAX_ERROR),
-				errmsg("property \"%s\" collation mismatch: %s vs. %s",
-					   propname, get_collation_name(propcollation), get_collation_name(exprcollation)),
-				errdetail("In a property graph, a property of the same name has to have the same collation in each label."));
-	}
+		/* Similarly for collation */
+		if (propcollation != exprcollation)
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("property \"%s\" collation mismatch: %s vs. %s",
+						   propname, get_collation_name(propcollation), get_collation_name(exprcollation)),
+					errdetail("In a property graph, a property of the same name has to have the same collation in each label."));
+		}
 
-	/*
-	 * And typmod. It does not seem to be necessary to enforce typmod
-	 * consistency across properties with the same name. But when properties
-	 * with the same name have different typmods, it is not clear which one
-	 * should be used as the typmod of the graph property when typmod of a
-	 * property is requested before fetching any of the property expressions.
-	 */
-	if (proptypmod != exprtypmod)
-	{
-		ereport(ERROR,
-				errcode(ERRCODE_SYNTAX_ERROR),
-				errmsg("property \"%s\" data type modifier mismatch: %d vs. %d",
-					   propname, proptypmod, exprtypmod),
-				errdetail("In a property graph, a property of the same name has to have the same type modifier in each label."));
+		/*
+		 * And typmod. It does not seem to be necessary to enforce typmod
+		 * consistency across properties with the same name. But when
+		 * properties with the same name have different typmods, it is not
+		 * clear which one should be used as the typmod of the graph property
+		 * when typmod of a property is requested before fetching any of the
+		 * property expressions.
+		 */
+		if (proptypmod != exprtypmod)
+		{
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("property \"%s\" data type modifier mismatch: %d vs. %d",
+						   propname, proptypmod, exprtypmod),
+					errdetail("In a property graph, a property of the same name has to have the same type modifier in each label."));
+		}
 	}
 
 	/*
@@ -1318,6 +1313,7 @@ AlterPropGraph(ParseState *pstate, const AlterPropGraphStmt *stmt)
 	Oid			pgrelid;
 	ListCell   *lc;
 	ObjectAddress pgaddress;
+	bool		need_check_all = false;
 
 	pgrelid = RangeVarGetRelidExtended(stmt->pgname,
 									   ShareRowExclusiveLock,
@@ -1341,6 +1337,7 @@ AlterPropGraph(ParseState *pstate, const AlterPropGraphStmt *stmt)
 		Relation	rel;
 		Oid			peoid;
 
+		need_check_all = true;
 		vinfo = palloc0_object(struct element_info);
 		vinfo->kind = PGEKIND_VERTEX;
 
@@ -1370,7 +1367,6 @@ AlterPropGraph(ParseState *pstate, const AlterPropGraphStmt *stmt)
 
 		CommandCounterIncrement();
 		check_element_properties(peoid);
-		check_all_labels_properties(pgrelid);
 	}
 
 	foreach(lc, stmt->add_edge_tables)
@@ -1382,6 +1378,7 @@ AlterPropGraph(ParseState *pstate, const AlterPropGraphStmt *stmt)
 		Relation	destrel;
 		Oid			peoid;
 
+		need_check_all = true;
 		einfo = palloc0_object(struct element_info);
 		einfo->kind = PGEKIND_EDGE;
 
@@ -1430,7 +1427,6 @@ AlterPropGraph(ParseState *pstate, const AlterPropGraphStmt *stmt)
 
 		CommandCounterIncrement();
 		check_element_properties(peoid);
-		check_all_labels_properties(pgrelid);
 	}
 
 	foreach(lc, stmt->drop_vertex_tables)
@@ -1673,6 +1669,8 @@ AlterPropGraph(ParseState *pstate, const AlterPropGraphStmt *stmt)
 		}
 	}
 
+	if (need_check_all)
+		check_all_labels_properties(pgrelid);
 	return pgaddress;
 }
 
