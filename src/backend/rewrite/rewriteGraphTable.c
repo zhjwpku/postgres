@@ -107,6 +107,7 @@ static Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
 Query *
 rewriteGraphTable(Query *parsetree, int rt_index)
 {
+	Relation	rel;
 	RangeTblEntry *rte;
 	Query	   *graph_table_query;
 	List	   *path_pattern;
@@ -123,6 +124,7 @@ rewriteGraphTable(Query *parsetree, int rt_index)
 
 	AcquireRewriteLocks(graph_table_query, true, false);
 
+	rel = table_open(rte->relid, AccessShareLock);
 	rte->rtekind = RTE_SUBQUERY;
 	rte->subquery = graph_table_query;
 	rte->lateral = true;
@@ -133,6 +135,7 @@ rewriteGraphTable(Query *parsetree, int rt_index)
 	 */
 	rte->graph_pattern = NULL;
 	rte->graph_table_columns = NIL;
+	table_close(rel, NoLock);
 
 #if 0
 	elog(INFO, "rewritten:\n%s", pg_get_querydef(copyObject(parsetree), false));
@@ -230,7 +233,8 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 				 * conjuction is not supported right now.
 				 */
 				if (!other->labelexpr)
-					other->labelexpr = gep->labelexpr;
+					other	  ->labelexpr = gep->labelexpr;
+
 				else if (gep->labelexpr && !equal(other->labelexpr, gep->labelexpr))
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -242,12 +246,14 @@ generate_queries_for_path_pattern(RangeTblEntry *rte, List *path_pattern)
 				 * element. Combine by ANDing them.
 				 */
 				if (!other->whereClause)
-					other->whereClause = gep->whereClause;
+					other	  ->whereClause = gep->whereClause;
+
 				else if (gep->whereClause)
-					other->whereClause = (Node *) makeBoolExpr(AND_EXPR,
-															   list_make2(other->whereClause, gep->whereClause),
-															   -1);
+					other	  ->whereClause = (Node *) makeBoolExpr(AND_EXPR,
+																	list_make2(other->whereClause, gep->whereClause),
+																	-1);
 				pf = other;
+
 				break;
 			}
 		}
