@@ -24,6 +24,7 @@
 #include "executor/execdesc.h"
 #include "executor/executor.h"
 #include "executor/tuptable.h"
+#include "funcapi.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
@@ -31,6 +32,7 @@
 #include "pgstat.h"
 #include "storage/fd.h"
 #include "tcop/tcopprot.h"
+#include "utils/json.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -125,6 +127,7 @@ static void CopyToCSVOneRow(CopyToState cstate, TupleTableSlot *slot);
 static void CopyToTextLikeOneRow(CopyToState cstate, TupleTableSlot *slot,
 								 bool is_csv);
 static void CopyToTextLikeEnd(CopyToState cstate);
+static void CopyToJsonOneRow(CopyToState cstate, TupleTableSlot *slot);
 static void CopyToBinaryStart(CopyToState cstate, TupleDesc tupDesc);
 static void CopyToBinaryOutFunc(CopyToState cstate, Oid atttypid, FmgrInfo *finfo);
 static void CopyToBinaryOneRow(CopyToState cstate, TupleTableSlot *slot);
@@ -164,6 +167,13 @@ static const CopyToRoutine CopyToRoutineCSV = {
 	.CopyToEnd = CopyToTextLikeEnd,
 };
 
+static const CopyToRoutine CopyToRoutineJson = {
+	.CopyToStart = CopyToTextLikeStart,
+	.CopyToOutFunc = CopyToTextLikeOutFunc,
+	.CopyToOneRow = CopyToJsonOneRow,
+	.CopyToEnd = CopyToTextLikeEnd,
+};
+
 /* binary format */
 static const CopyToRoutine CopyToRoutineBinary = {
 	.CopyToStart = CopyToBinaryStart,
@@ -176,16 +186,18 @@ static const CopyToRoutine CopyToRoutineBinary = {
 static const CopyToRoutine *
 CopyToGetRoutine(CopyFormatOptions opts)
 {
-	if (opts.csv_mode)
+	if (opts.format == COPY_FORMAT_CSV)
 		return &CopyToRoutineCSV;
-	else if (opts.binary)
+	else if (opts.format == COPY_FORMAT_BINARY)
 		return &CopyToRoutineBinary;
+	else if (opts.format == COPY_FORMAT_JSON)
+		return &CopyToRoutineJson;
 
 	/* default is text */
 	return &CopyToRoutineText;
 }
 
-/* Implementation of the start callback for text and CSV formats */
+/* Implementation of the start callback for text, CSV and json formats */
 static void
 CopyToTextLikeStart(CopyToState cstate, TupleDesc tupDesc)
 {
@@ -215,7 +227,7 @@ CopyToTextLikeStart(CopyToState cstate, TupleDesc tupDesc)
 
 			colname = NameStr(TupleDescAttr(tupDesc, attnum - 1)->attname);
 
-			if (cstate->opts.csv_mode)
+			if (cstate->opts.format == COPY_FORMAT_CSV)
 				CopyAttributeOutCSV(cstate, colname, false);
 			else
 				CopyAttributeOutText(cstate, colname);
@@ -226,7 +238,7 @@ CopyToTextLikeStart(CopyToState cstate, TupleDesc tupDesc)
 }
 
 /*
- * Implementation of the outfunc callback for text and CSV formats. Assign
+ * Implementation of the outfunc callback for text, CSV, json formats. Assign
  * the output function data to the given *finfo.
  */
 static void
@@ -304,6 +316,38 @@ static void
 CopyToTextLikeEnd(CopyToState cstate)
 {
 	/* Nothing to do here */
+}
+
+/* Implementation of per-row callback for json format */
+static void
+CopyToJsonOneRow(CopyToState cstate, TupleTableSlot *slot)
+{
+	Datum		rowdata;
+	StringInfo	result;
+
+	/*
+	 * if COPY TO source data is from a query, not a plain table, then we need
+	 * copy CopyToState->TupleDesc to slot->tts_tupleDescriptor. because the
+	 * slot's TupleDesc->attrs may change during query execution.
+	 */
+	if (!cstate->rel)
+	{
+		memcpy(TupleDescAttr(slot->tts_tupleDescriptor, 0),
+			   TupleDescAttr(cstate->queryDesc->tupDesc, 0),
+			   cstate->queryDesc->tupDesc->natts * sizeof(FormData_pg_attribute));
+
+		for (int i = 0; i < cstate->queryDesc->tupDesc->natts; i++)
+			populate_compact_attribute(slot->tts_tupleDescriptor, i);
+
+		BlessTupleDesc(slot->tts_tupleDescriptor);
+	}
+	rowdata = ExecFetchSlotHeapTupleDatum(slot);
+	result = makeStringInfo();
+	composite_to_json(rowdata, result, false);
+
+	CopySendData(cstate, result->data, result->len);
+
+	CopySendTextLikeEndOfRow(cstate);
 }
 
 /*
@@ -392,14 +436,25 @@ SendCopyBegin(CopyToState cstate)
 {
 	StringInfoData buf;
 	int			natts = list_length(cstate->attnumlist);
-	int16		format = (cstate->opts.binary ? 1 : 0);
+	int16		format = (cstate->opts.format == COPY_FORMAT_BINARY ? 1 : 0);
 	int			i;
 
 	pq_beginmessage(&buf, PqMsg_CopyOutResponse);
 	pq_sendbyte(&buf, format);	/* overall format */
-	pq_sendint16(&buf, natts);
-	for (i = 0; i < natts; i++)
-		pq_sendint16(&buf, format); /* per-column formats */
+	if (cstate->opts.format != COPY_FORMAT_JSON)
+	{
+		pq_sendint16(&buf, natts);
+		for (i = 0; i < natts; i++)
+			pq_sendint16(&buf, format); /* per-column formats */
+	}
+	else
+	{
+		/*
+		 * JSON format is always one non-binary column
+		 */
+		pq_sendint16(&buf, 1);
+		pq_sendint16(&buf, 0);
+	}
 	pq_endmessage(&buf);
 	cstate->copy_dest = COPY_FRONTEND;
 }

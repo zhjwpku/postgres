@@ -3283,7 +3283,7 @@ match_previous_words(int pattern_id,
 
 	/* Complete COPY <sth> FROM|TO filename WITH (FORMAT */
 	else if (Matches("COPY|\\copy", MatchAny, "FROM|TO", MatchAny, "WITH", "(", "FORMAT"))
-		COMPLETE_WITH("binary", "csv", "text");
+		COMPLETE_WITH("binary", "csv", "text", "json");
 
 	/* Complete COPY <sth> FROM filename WITH (ON_ERROR */
 	else if (Matches("COPY|\\copy", MatchAny, "FROM|TO", MatchAny, "WITH", "(", "ON_ERROR"))

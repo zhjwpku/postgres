@@ -155,9 +155,9 @@ static const CopyFromRoutine CopyFromRoutineBinary = {
 static const CopyFromRoutine *
 CopyFromGetRoutine(CopyFormatOptions opts)
 {
-	if (opts.csv_mode)
+	if (opts.format == COPY_FORMAT_CSV)
 		return &CopyFromRoutineCSV;
-	else if (opts.binary)
+	else if (opts.format == COPY_FORMAT_BINARY)
 		return &CopyFromRoutineBinary;
 
 	/* default is text */
@@ -261,7 +261,7 @@ CopyFromErrorCallback(void *arg)
 				   cstate->cur_relname);
 		return;
 	}
-	if (cstate->opts.binary)
+	if (cstate->opts.format == COPY_FORMAT_BINARY)
 	{
 		/* can't usefully display the data */
 		if (cstate->cur_attname)

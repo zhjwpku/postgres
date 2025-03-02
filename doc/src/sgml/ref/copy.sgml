@@ -219,9 +219,14 @@ COPY { <replaceable class="parameter">table_name</replaceable> [ ( <replaceable 
       Selects the data format to be read or written:
       <literal>text</literal>,
       <literal>csv</literal> (Comma Separated Values),
+      <literal>json</literal> (JavaScript Object Notation),
       or <literal>binary</literal>.
       The default is <literal>text</literal>.
       See <xref linkend="sql-copy-file-formats"/> below for details.
+     </para>
+     <para>
+      The <literal>json</literal> option is allowed only in
+      <command>COPY TO</command>.
      </para>
     </listitem>
    </varlistentry>
@@ -257,7 +262,7 @@ COPY { <replaceable class="parameter">table_name</replaceable> [ ( <replaceable 
       (line) of the file.  The default is a tab character in text format,
       a comma in <literal>CSV</literal> format.
       This must be a single one-byte character.
-      This option is not allowed when using <literal>binary</literal> format.
+      This option is not allowed when using <literal>binary</literal> or <literal>json</literal> format.
      </para>
     </listitem>
    </varlistentry>
@@ -271,7 +276,7 @@ COPY { <replaceable class="parameter">table_name</replaceable> [ ( <replaceable 
       string in <literal>CSV</literal> format. You might prefer an
       empty string even in text format for cases where you don't want to
       distinguish nulls from empty strings.
-      This option is not allowed when using <literal>binary</literal> format.
+      This option is not allowed when using <literal>binary</literal> or <literal>json</literal> format.
      </para>
 
      <note>
@@ -294,7 +299,7 @@ COPY { <replaceable class="parameter">table_name</replaceable> [ ( <replaceable 
       is found in the input file, the default value of the corresponding column
       will be used.
       This option is allowed only in <command>COPY FROM</command>, and only when
-      not using <literal>binary</literal> format.
+      not using <literal>binary</literal> or <literal>json</literal> format.
      </para>
     </listitem>
    </varlistentry>
@@ -310,7 +315,7 @@ COPY { <replaceable class="parameter">table_name</replaceable> [ ( <replaceable 
       If this option is set to <literal>MATCH</literal>, the number and names
       of the columns in the header line must match the actual column names of
       the table, in order;  otherwise an error is raised.
-      This option is not allowed when using <literal>binary</literal> format.
+      This option is not allowed when using <literal>binary</literal> or <literal>json</literal> format.
       The <literal>MATCH</literal> option is only valid for <command>COPY
       FROM</command> commands.
      </para>
