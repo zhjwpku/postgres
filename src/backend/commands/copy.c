@@ -504,6 +504,7 @@ ProcessCopyOptions(ParseState *pstate,
 	bool		on_error_specified = false;
 	bool		log_verbosity_specified = false;
 	bool		reject_limit_specified = false;
+	bool		force_array_specified = false;
 	ListCell   *option;
 
 	/* Support external use for option sanity checking */
@@ -657,6 +658,13 @@ ProcessCopyOptions(ParseState *pstate,
 						 errmsg("argument to option \"%s\" must be a valid encoding name",
 								defel->defname),
 						 parser_errposition(pstate, defel->location)));
+		}
+		else if (strcmp(defel->defname, "force_array") == 0)
+		{
+			if (force_array_specified)
+				errorConflictingDefElem(defel, pstate);
+			force_array_specified = true;
+			opts_out->force_array = defGetBoolean(defel);
 		}
 		else if (strcmp(defel->defname, "on_error") == 0)
 		{
@@ -905,6 +913,11 @@ ProcessCopyOptions(ParseState *pstate,
 		ereport(ERROR,
 				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				errmsg("COPY json mode cannot be used with %s", "COPY FROM"));
+
+	if (opts_out->format != COPY_FORMAT_JSON && opts_out->force_array)
+		ereport(ERROR,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("COPY %s can only used with JSON mode", "FORCE_ARRAY"));
 
 	if (opts_out->default_print)
 	{
