@@ -33,6 +33,7 @@
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "catalog/pg_am.h"
+#include "executor/execScan.h"
 #include "executor/executor.h"
 #include "executor/nodeIndexscan.h"
 #include "lib/pairingheap.h"
@@ -520,6 +521,131 @@ ExecIndexScan(PlanState *pstate)
 {
 	IndexScanState *node = castNode(IndexScanState, pstate);
 
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	/*
+	 * If we have runtime keys and they've not already been set up, do it now.
+	 */
+	if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
+		ExecReScan((PlanState *) node);
+
+	if (node->iss_NumOrderByKeys > 0)
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNextWithReorder,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								NULL,
+								NULL);
+	else
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNext,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								NULL,
+								NULL);
+}
+
+static TupleTableSlot *
+ExecIndexScanWithQual(PlanState *pstate)
+{
+	IndexScanState *node = castNode(IndexScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	/*
+	 * If we have runtime keys and they've not already been set up, do it now.
+	 */
+	if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
+		ExecReScan((PlanState *) node);
+
+	if (node->iss_NumOrderByKeys > 0)
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNextWithReorder,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								pstate->qual,
+								NULL);
+	else
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNext,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								pstate->qual,
+								NULL);
+
+}
+
+static TupleTableSlot *
+ExecIndexScanWithProject(PlanState *pstate)
+{
+	IndexScanState *node = castNode(IndexScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo != NULL);
+
+	/*
+	 * If we have runtime keys and they've not already been set up, do it now.
+	 */
+	if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
+		ExecReScan((PlanState *) node);
+
+	if (node->iss_NumOrderByKeys > 0)
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNextWithReorder,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								NULL,
+								pstate->ps_ProjInfo);
+	else
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNext,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								NULL,
+								pstate->ps_ProjInfo);
+}
+
+static TupleTableSlot *
+ExecIndexScanWithQualProject(PlanState *pstate)
+{
+	IndexScanState *node = castNode(IndexScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo != NULL);
+
+	/*
+	 * If we have runtime keys and they've not already been set up, do it now.
+	 */
+	if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
+		ExecReScan((PlanState *) node);
+
+	if (node->iss_NumOrderByKeys > 0)
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNextWithReorder,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								pstate->qual,
+								pstate->ps_ProjInfo);
+	else
+		return ExecScanExtended(&node->ss,
+								(ExecScanAccessMtd) IndexNext,
+								(ExecScanRecheckMtd) IndexRecheck,
+								NULL,
+								pstate->qual,
+								pstate->ps_ProjInfo);
+}
+
+static TupleTableSlot *
+ExecIndexScanEPQ(PlanState *pstate)
+{
+	IndexScanState *node = castNode(IndexScanState, pstate);
+
 	/*
 	 * If we have runtime keys and they've not already been set up, do it now.
 	 */
@@ -895,7 +1021,6 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	indexstate = makeNode(IndexScanState);
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
-	indexstate->ss.ps.ExecProcNode = ExecIndexScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -1063,6 +1188,23 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	else
 	{
 		indexstate->iss_RuntimeContext = NULL;
+	}
+
+	if (indexstate->ss.ps.state->es_epq_active != NULL)
+		indexstate->ss.ps.ExecProcNode = ExecIndexScanEPQ;
+	else if (indexstate->ss.ps.qual == NULL)
+	{
+		if (indexstate->ss.ps.ps_ProjInfo == NULL)
+			indexstate->ss.ps.ExecProcNode = ExecIndexScan;
+		else
+			indexstate->ss.ps.ExecProcNode = ExecIndexScanWithProject;
+	}
+	else
+	{
+		if (indexstate->ss.ps.ps_ProjInfo == NULL)
+			indexstate->ss.ps.ExecProcNode = ExecIndexScanWithQual;
+		else
+			indexstate->ss.ps.ExecProcNode = ExecIndexScanWithQualProject;
 	}
 
 	/*
