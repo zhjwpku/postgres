@@ -322,6 +322,7 @@ extern PGDLLIMPORT const struct config_enum_entry io_method_options[];
 extern PGDLLIMPORT const struct config_enum_entry recovery_target_action_options[];
 extern PGDLLIMPORT const struct config_enum_entry wal_level_options[];
 extern PGDLLIMPORT const struct config_enum_entry wal_sync_method_options[];
+extern PGDLLIMPORT const struct config_enum_entry autovacuum_vac_strategy_options[];
 
 /*
  * Functions exported by guc.c

@@ -5418,6 +5418,16 @@ struct config_enum ConfigureNamesEnum[] =
 		NULL, assign_io_method, NULL
 	},
 
+	{
+		{"autovacuum_vacuum_strategy", PGC_SIGHUP, VACUUM_AUTOVACUUM,
+			gettext_noop("Vacuum strategy for autovacuum."),
+			NULL
+		},
+		&autovacuum_vac_strategy,
+		AUTOVACUUM_VAC_STRATEGY_SEQUENTIAL, autovacuum_vac_strategy_options,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, 0, NULL, NULL, NULL, NULL

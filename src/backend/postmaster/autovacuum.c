@@ -79,6 +79,7 @@
 #include "catalog/pg_namespace.h"
 #include "commands/dbcommands.h"
 #include "commands/vacuum.h"
+#include "common/pg_prng.h"
 #include "common/int.h"
 #include "lib/ilist.h"
 #include "libpq/pqsignal.h"
@@ -132,8 +133,15 @@ int			autovacuum_multixact_freeze_max_age;
 
 double		autovacuum_vac_cost_delay;
 int			autovacuum_vac_cost_limit;
+int			autovacuum_vac_strategy;
 
 int			Log_autovacuum_min_duration = 600000;
+
+const struct config_enum_entry autovacuum_vac_strategy_options[] = {
+	{"sequential", AUTOVACUUM_VAC_STRATEGY_SEQUENTIAL, false},
+	{"random", AUTOVACUUM_VAC_STRATEGY_RANDOM, false},
+	{NULL, 0, false}
+};
 
 /* the minimum allowed time between two awakenings of the launcher */
 #define MIN_AUTOVAC_SLEEPTIME 100.0 /* milliseconds */
@@ -2268,6 +2276,30 @@ do_autovacuum(void)
 										  ALLOCSET_DEFAULT_SIZES);
 
 	/*
+	 * Randomly rotate the list of tables to vacuum.  This is to avoid always
+	 * vacuuming the same table first, which could lead to spinning on the
+	 * same table or vacuuming starvation.
+	 */
+	if (list_length(table_oids) > 1 && autovacuum_vac_strategy == AUTOVACUUM_VAC_STRATEGY_RANDOM)
+	{
+
+		int			rand = 0;
+		static pg_prng_state prng_state;
+		List	   *tmp_oids = NIL;
+
+		pg_prng_seed(&prng_state, (uint64) (getpid() ^ time(NULL)));
+		rand = (int) pg_prng_uint64_range(&prng_state, 0,
+										  list_length(table_oids) - 1);
+		if (rand != 0)
+		{
+			tmp_oids = list_copy_tail(table_oids, rand);
+			table_oids = list_copy_head(table_oids,
+										list_length(table_oids) - rand);
+			table_oids = list_concat(table_oids, tmp_oids);
+		}
+	}
+
+	/*
 	 * Perform operations on collected tables.
 	 */
 	foreach(cell, table_oids)
@@ -3282,6 +3314,7 @@ AutoVacuumRequestWork(AutoVacuumWorkItemType type, Oid relationId,
 		workitem->avw_used = true;
 		workitem->avw_active = false;
 		workitem->avw_type = type;
+
 		workitem->avw_database = MyDatabaseId;
 		workitem->avw_relation = relationId;
 		workitem->avw_blockNumber = blkno;

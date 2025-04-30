@@ -713,6 +713,7 @@ autovacuum_worker_slots = 16	# autovacuum worker slots to allocate
 #autovacuum_vacuum_cost_limit = -1	# default vacuum cost limit for
 					# autovacuum, -1 means use
 					# vacuum_cost_limit
+#autovacuum_vacuum_strategy = sequential
 
 # - Cost-Based Vacuum Delay -
 

@@ -25,6 +25,12 @@ typedef enum
 	AVW_BRINSummarizeRange,
 } AutoVacuumWorkItemType;
 
+/* Autovacuum vacuum strategies */
+enum AutovacuumVacStrategy
+{
+	AUTOVACUUM_VAC_STRATEGY_SEQUENTIAL = 0,
+	AUTOVACUUM_VAC_STRATEGY_RANDOM,
+};
 
 /* GUC variables */
 extern PGDLLIMPORT bool autovacuum_start_daemon;
@@ -43,6 +49,7 @@ extern PGDLLIMPORT int autovacuum_freeze_max_age;
 extern PGDLLIMPORT int autovacuum_multixact_freeze_max_age;
 extern PGDLLIMPORT double autovacuum_vac_cost_delay;
 extern PGDLLIMPORT int autovacuum_vac_cost_limit;
+extern PGDLLIMPORT int autovacuum_vac_strategy;
 
 /* autovacuum launcher PID, only valid when worker is shutting down */
 extern PGDLLIMPORT int AutovacuumLauncherPid;
