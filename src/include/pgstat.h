@@ -443,6 +443,7 @@ typedef struct PgStat_StatTabEntry
 	TimestampTz last_vacuum_time;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
 	TimestampTz last_autovacuum_time;	/* autovacuum initiated */
+	PgStat_Counter last_autovacuum_removed_tuples_percent;
 	PgStat_Counter autovacuum_count;
 	TimestampTz last_analyze_time;	/* user initiated */
 	PgStat_Counter analyze_count;

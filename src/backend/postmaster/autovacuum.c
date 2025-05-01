@@ -3093,6 +3093,22 @@ relation_needs_vacanalyze(Oid relid,
 		float4		reltuples = classForm->reltuples;
 		int32		relpages = classForm->relpages;
 		int32		relallfrozen = classForm->relallfrozen;
+		float4		last_remove_tuples_percent = tabentry->last_autovacuum_removed_tuples_percent;
+		TimestampTz last_autovacuum_time = tabentry->last_autovacuum_time;
+
+		/*
+		 * If the last autovacuum removed tuples is less than 10% of the
+		 * current dead tuples, then skip vacuuming this table for some time.
+		 */
+		if (!TimestampDifferenceExceedsSeconds(last_autovacuum_time,
+											   GetCurrentTimestamp(),
+											   autovacuum_naptime) &&
+			last_remove_tuples_percent < 10.0)
+		{
+			*doanalyze = false;
+			*dovacuum = false;
+			return;
+		}
 
 		vactuples = tabentry->dead_tuples;
 		instuples = tabentry->ins_since_vacuum;

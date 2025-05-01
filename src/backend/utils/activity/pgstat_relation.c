@@ -217,6 +217,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 	TimestampTz ts;
 	PgStat_Counter elapsedtime;
+	PgStat_Counter old_dead_tuples;
 
 	if (!pgstat_track_counts)
 		return;
@@ -232,6 +233,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	shtabentry = (PgStatShared_Relation *) entry_ref->shared_stats;
 	tabentry = &shtabentry->stats;
 
+	old_dead_tuples = tabentry->dead_tuples;
 	tabentry->live_tuples = livetuples;
 	tabentry->dead_tuples = deadtuples;
 
@@ -250,6 +252,11 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	if (AmAutoVacuumWorkerProcess())
 	{
 		tabentry->last_autovacuum_time = ts;
+		if (old_dead_tuples > deadtuples)
+			tabentry->last_autovacuum_removed_tuples_percent =
+				100 * (old_dead_tuples - deadtuples) / old_dead_tuples;
+		else
+			tabentry->last_autovacuum_removed_tuples_percent = 0;
 		tabentry->autovacuum_count++;
 		tabentry->total_autovacuum_time += elapsedtime;
 	}
