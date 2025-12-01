@@ -24,12 +24,15 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/skey.h"
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "catalog/index.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_namespace.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
@@ -240,6 +243,188 @@ pg_noreturn static void ri_ReportViolation(const RI_ConstraintInfo *riinfo,
 										   TupleTableSlot *violatorslot, TupleDesc tupdesc,
 										   int queryno, bool is_restrict, bool partgone);
 
+static bool
+ri_fastpath_is_applicable(const RI_ConstraintInfo *riinfo, Relation pk_rel)
+{
+	/*
+	 * Partitioned referenced tables are skipped for simplicity, since
+	 * they require routing the probe through the correct partition using
+	 * PartitionDirectory.
+	 * This can be added later as a separate patch once the core mechanism
+	 * is stable.
+	 */
+	if (pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		return false;
+
+	/*
+	 * Temporal foreign keys use range overlap and containment semantics
+	 * (&&, <@, range_agg()) that inherently involve aggregation and
+	 * multiple-row reasoning, so they stay on the SPI path.
+	 */
+	if (riinfo->hasperiod)
+		return false;
+
+	return true;
+}
+
+/*
+ * get_fkey_unique_index
+ *  Returns the unique index used by a supposedly foreign key constraint
+ *
+ * XXX This is very similar to get_constraint_index; probably they should be
+ * unified.
+ */
+static Oid
+get_fkey_unique_index(Oid conoid)
+{
+	Oid			result = InvalidOid;
+	HeapTuple	tp;
+
+	tp = SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid));
+	if (HeapTupleIsValid(tp))
+	{
+		Form_pg_constraint contup = (Form_pg_constraint) GETSTRUCT(tp);
+
+		if (contup->contype == CONSTRAINT_FOREIGN)
+			result = contup->conindid;
+		ReleaseSysCache(tp);
+	}
+
+	if (!OidIsValid(result))
+		elog(ERROR, "unique index not found for foreign key constraint %u",
+			 conoid);
+
+	return result;
+}
+
+/*
+ * ri_CheckPermissions
+ *   Check that the new user has permissions to look into the schema of
+ *   and SELECT from 'query_rel'
+ *
+ * Provided for non-SQL implementors of an RI_Plan.
+ */
+static void
+ri_CheckPermissions(Relation query_rel)
+{
+	AclResult aclresult;
+
+	/* USAGE on schema. */
+	aclresult = object_aclcheck(NamespaceRelationId,
+								RelationGetNamespace(query_rel),
+								GetUserId(), ACL_USAGE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, OBJECT_SCHEMA,
+					   get_namespace_name(RelationGetNamespace(query_rel)));
+
+	/* SELECT on relation. */
+	aclresult = pg_class_aclcheck(RelationGetRelid(query_rel), GetUserId(),
+								  ACL_SELECT);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, OBJECT_TABLE,
+					   RelationGetRelationName(query_rel));
+}
+
+/*
+ * This checks that the index key of the tuple specified in 'new_slot' matches
+ * the key that has already been found in the PK index relation 'idxrel'.
+ *
+ * Returns true if the index key of the tuple matches the existing index
+ * key, false otherwise.
+ */
+static bool
+recheck_matched_pk_tuple(Relation idxrel, ScanKeyData *skeys,
+						 TupleTableSlot *new_slot)
+{
+	IndexInfo *indexInfo = BuildIndexInfo(idxrel);
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+	bool		matched = true;
+
+	/* PK indexes never have these. */
+	Assert(indexInfo->ii_Expressions == NIL &&
+		   indexInfo->ii_ExclusionOps == NULL);
+
+	/* Form the index values and isnull flags given the table tuple. */
+	FormIndexDatum(indexInfo, new_slot, NULL, values, isnull);
+	for (int i = 0; i < indexInfo->ii_NumIndexKeyAttrs; i++)
+	{
+		ScanKeyData		*skey = &skeys[i];
+
+		/* A PK column can never be set to NULL. */
+		Assert(!isnull[i]);
+		if (!DatumGetBool(FunctionCall2Coll(&skey->sk_func,
+											skey->sk_collation,
+											skey->sk_argument,
+											values[i])))
+		{
+			matched = false;
+			break;
+		}
+	}
+
+	return matched;
+}
+
+/*
+ * Doesn't include any cache for now.
+ */
+static void
+build_scankeys_from_cache(const RI_ConstraintInfo *riinfo,
+						  Relation pk_rel, Relation fk_rel,
+						  Relation idx_rel, int num_pk,
+						  Datum *pk_vals, char *pk_nulls,
+						  ScanKey skeys)
+{
+	/* Use PK = FK equality operator. */
+	const Oid *eq_oprs = riinfo->pf_eq_oprs;
+
+	Assert(num_pk == riinfo->nkeys);
+
+	/*
+	 * May need to cast each of the individual values of the foreign key
+	 * to the corresponding PK column's type if the equality operator
+	 * demands it.
+	 */
+	for (int i = 0; i < riinfo->nkeys; i++)
+	{
+		if (pk_nulls[i] != 'n')
+		{
+			Oid  eq_opr = eq_oprs[i];
+			Oid  typeid = RIAttType(fk_rel, riinfo->fk_attnums[i]);
+			RI_CompareHashEntry *entry = ri_HashCompareOp(eq_opr, typeid);
+
+			if (OidIsValid(entry->cast_func_finfo.fn_oid))
+				pk_vals[i] = FunctionCall3(&entry->cast_func_finfo,
+										   pk_vals[i],
+										   Int32GetDatum(-1), /* typmod */
+										   BoolGetDatum(false)); /* implicit coercion */
+		} else {
+			Assert(false);
+		}
+	}
+
+	/*
+	 * Set up ScanKeys for the index scan. This is essentially how
+	 * ExecIndexBuildScanKeys() sets them up.
+	 */
+	for (int i = 0; i < num_pk; i++)
+	{
+		int		pkattrno = i + 1;
+		Oid		lefttype,
+				righttype;
+		Oid		operator = eq_oprs[i];
+		Oid		opfamily = idx_rel->rd_opfamily[i];
+		int  strat;
+		RegProcedure regop = get_opcode(operator);
+
+		get_op_opfamily_properties(operator, opfamily, false, &strat,
+								   &lefttype, &righttype);
+		ScanKeyEntryInitialize(&skeys[i], 0, pkattrno, strat, righttype,
+							   idx_rel->rd_indcollation[i], regop,
+							   pk_vals[i]);
+	}
+}
 
 /*
  * RI_FKey_check -
@@ -350,6 +535,132 @@ RI_FKey_check(TriggerData *trigdata)
 			 */
 			break;
 	}
+
+	/* Fast path, for simple cases, probe the unique index directly */
+	if (ri_fastpath_is_applicable(riinfo, pk_rel))
+	{
+		Oid			idxoid;
+		Relation	idxrel;
+		int			num_pk;
+		Datum		pk_vals[INDEX_MAX_KEYS];
+		char		pk_nulls[INDEX_MAX_KEYS];
+		ScanKeyData	skey[INDEX_MAX_KEYS];
+		IndexScanDesc	scan;
+		TupleTableSlot *outslot;
+		Oid				saved_userid;
+		int				saved_sec_context;
+		bool			tuple_concurrently_updated;
+		int				tuples_processed = 0;
+
+		elog(DEBUG1,
+			 "RI fastpath: constraint \"%s\" using fast path",
+			 NameStr(riinfo->conname));
+
+		/*
+		 * Extract the unique key from the provided slot and choose the
+		 * equality operators to use when scanning the index below.
+		 */
+		ri_ExtractValues(fk_rel, newslot, riinfo, false, pk_vals, pk_nulls);
+
+		/*
+		 * Switch to referenced table's owner to perform the below operations as.
+		 * This matches what ri_PerformCheck() does.
+		 */
+		GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
+		SetUserIdAndSecContext(RelationGetForm(pk_rel)->relowner,
+							   saved_sec_context | SECURITY_LOCAL_USERID_CHANGE |
+							   SECURITY_NOFORCE_RLS);
+		ri_CheckPermissions(pk_rel);
+
+		PushActiveSnapshot(GetTransactionSnapshot());
+		CommandCounterIncrement();
+		UpdateActiveSnapshotCommandId();
+
+		/*
+		 * Open the constraint index to be scanned.
+		 *
+		 * Handle partitioned 'pk_rel' later, skipped in ri_fastpath_is_applicable
+		 */
+		idxoid = get_fkey_unique_index(riinfo->constraint_id);
+		idxrel = index_open(idxoid, RowShareLock);
+		num_pk = IndexRelationGetNumberOfKeyAttributes(idxrel);
+
+		build_scankeys_from_cache(riinfo, pk_rel, fk_rel, idxrel, num_pk,
+								  pk_vals, pk_nulls, skey);
+
+		scan = index_beginscan(pk_rel, idxrel, GetActiveSnapshot(), NULL, riinfo->nkeys, 0);
+
+		/* Install the ScanKeys. */
+		index_rescan(scan, skey, num_pk, NULL, 0);
+
+		/* should be cached, avoid create for each row */
+		outslot = table_slot_create(pk_rel, NULL);
+
+		/* Look for the tuple, and if found, try to lock it in key share mode. */
+		if (!index_getnext_slot(scan, ForwardScanDirection, outslot))
+			ri_ReportViolation(riinfo,
+							   pk_rel, fk_rel,
+							   newslot,
+							   NULL,
+							   RI_PLAN_CHECK_LOOKUPPK, false, false);
+
+		/*
+		 * If we fail to lock the tuple for whatever reason, assume it doesn't
+		 * exist.  If the locked tuple is the one that was found to be updated
+		 * concurrently, retry.
+		 */
+		if (ExecLockTableTuple(pk_rel, &(outslot->tts_tid), outslot,
+							   GetActiveSnapshot(),
+							   GetCurrentCommandId(false),
+							   LockTupleKeyShare,
+							   LockWaitBlock,
+							   &tuple_concurrently_updated))
+		{
+			bool		matched = true;
+
+			/*
+			 * If the matched table tuple has been updated, check if the key is
+			 * still the same.
+			 *
+			 * This emulates EvalPlanQual() in the executor.
+			 */
+			if (tuple_concurrently_updated &&
+				!recheck_matched_pk_tuple(idxrel, skey, outslot))
+				matched = false;
+
+			if (matched)
+				tuples_processed = 1;
+		}
+
+		index_endscan(scan);
+		ExecDropSingleTupleTableSlot(outslot);
+
+		/* Don't release lock until commit. */
+		index_close(idxrel, NoLock);
+
+		PopActiveSnapshot();
+
+		/* Restore UID and security context */
+		SetUserIdAndSecContext(saved_userid, saved_sec_context);
+
+		if (tuples_processed == 1)
+		{
+			table_close(pk_rel, RowShareLock);
+			return PointerGetDatum(NULL);
+		}
+		else
+		{
+			ri_ReportViolation(riinfo,
+							   pk_rel, fk_rel,
+							   newslot,
+							   NULL,
+							   RI_PLAN_CHECK_LOOKUPPK, false, false);
+		}
+	}
+
+	/* Fall back to SPI */
+	elog(DEBUG1, "RI fastpath: constraint \"%s\" falling back to SPI",
+		 NameStr(riinfo->conname));
 
 	SPI_connect();
 
@@ -3167,8 +3478,16 @@ ri_HashCompareOp(Oid eq_opr, Oid typeid)
 		 * moment since that will never be generated for implicit coercions.
 		 */
 		op_input_types(eq_opr, &lefttype, &righttype);
-		Assert(lefttype == righttype);
-		if (typeid == lefttype)
+
+		/*
+		 * Don't need to cast if the values that will be passed to the
+		 * operator will be of expected operand type(s).  The operator can be
+		 * cross-type (such as when called by ri_LookupKeyInPkRel()), in which
+		 * case, we only need the cast if the right operand value doesn't match
+		 * the type expected by the operator.
+		 */
+		if ((lefttype == righttype && typeid == lefttype) ||
+			(lefttype != righttype && typeid == righttype))
 			castfunc = InvalidOid;	/* simplest case */
 		else
 		{
