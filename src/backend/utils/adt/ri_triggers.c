@@ -94,6 +94,7 @@
 #define RI_TRIGTYPE_UPDATE 2
 #define RI_TRIGTYPE_DELETE 3
 
+struct RI_CompareHashEntry;
 
 /*
  * RI_ConstraintInfo
@@ -135,6 +136,16 @@ typedef struct RI_ConstraintInfo
 	Oid			period_intersect_oper;	/* anyrange * anyrange (or
 										 * multiranges) */
 	dlist_node	valid_link;		/* Link in list of valid entries */
+
+	/* Fast-path metadata for RI checks on foreign tables */
+	bool		fpmeta_valid; /* is fast-path metadata valid? */
+	// Relation	idxrel;
+	// IndexScanDesc idxscan;
+	// TupleTableSlot *outslot;
+	struct RI_CompareHashEntry *compare_entries[RI_MAX_NUMKEYS];
+	RegProcedure	regops[RI_MAX_NUMKEYS];
+	Oid				subtypes[RI_MAX_NUMKEYS];
+	int				strats[RI_MAX_NUMKEYS];
 } RI_ConstraintInfo;
 
 /*
@@ -297,6 +308,42 @@ get_fkey_unique_index(Oid conoid)
 	return result;
 }
 
+static void
+ri_populate_fastpath_metadata(Oid constraintOid,
+							  Relation pk_rel, Relation fk_rel, Relation idx_rel)
+{
+	RI_ConstraintInfo *riinfo;
+
+	/* Find the constraint info */
+	riinfo = (RI_ConstraintInfo *)
+		hash_search(ri_constraint_cache,
+					&constraintOid,
+					HASH_FIND,
+					NULL);
+	Assert(riinfo != NULL && riinfo->valid);
+
+	for (int i = 0; i < riinfo->nkeys; i++)
+	{
+		/* Use PK = FK equality operator. */
+		Oid eq_opr = riinfo->pf_eq_oprs[i];
+		Oid typeid = RIAttType(fk_rel, riinfo->fk_attnums[i]);
+		Oid lefttype;
+		RI_CompareHashEntry *entry = ri_HashCompareOp(eq_opr, typeid);
+
+		riinfo->compare_entries[i] = entry;
+		riinfo->regops[i] = get_opcode(eq_opr);
+
+		get_op_opfamily_properties(eq_opr,
+								   idx_rel->rd_opfamily[i],
+								   false,
+								   &riinfo->strats[i],
+								   &lefttype,
+								   &riinfo->subtypes[i]);
+	}
+
+	riinfo->fpmeta_valid = true;
+}
+
 /*
  * ri_CheckPermissions
  *   Check that the new user has permissions to look into the schema of
@@ -367,20 +414,14 @@ recheck_matched_pk_tuple(Relation idxrel, ScanKeyData *skeys,
 }
 
 /*
- * Doesn't include any cache for now.
+ * Build ScanKeys from cached metadata for fast-path foreign key checks
  */
 static void
 build_scankeys_from_cache(const RI_ConstraintInfo *riinfo,
 						  Relation pk_rel, Relation fk_rel,
-						  Relation idx_rel, int num_pk,
-						  Datum *pk_vals, char *pk_nulls,
-						  ScanKey skeys)
+						  Relation idx_rel, Datum *pk_vals,
+						  char *pk_nulls, ScanKey skeys)
 {
-	/* Use PK = FK equality operator. */
-	const Oid *eq_oprs = riinfo->pf_eq_oprs;
-
-	Assert(num_pk == riinfo->nkeys);
-
 	/*
 	 * May need to cast each of the individual values of the foreign key
 	 * to the corresponding PK column's type if the equality operator
@@ -390,9 +431,7 @@ build_scankeys_from_cache(const RI_ConstraintInfo *riinfo,
 	{
 		if (pk_nulls[i] != 'n')
 		{
-			Oid  eq_opr = eq_oprs[i];
-			Oid  typeid = RIAttType(fk_rel, riinfo->fk_attnums[i]);
-			RI_CompareHashEntry *entry = ri_HashCompareOp(eq_opr, typeid);
+			RI_CompareHashEntry *entry = riinfo->compare_entries[i];
 
 			if (OidIsValid(entry->cast_func_finfo.fn_oid))
 				pk_vals[i] = FunctionCall3(&entry->cast_func_finfo,
@@ -408,20 +447,12 @@ build_scankeys_from_cache(const RI_ConstraintInfo *riinfo,
 	 * Set up ScanKeys for the index scan. This is essentially how
 	 * ExecIndexBuildScanKeys() sets them up.
 	 */
-	for (int i = 0; i < num_pk; i++)
+	for (int i = 0; i < riinfo->nkeys; i++)
 	{
 		int		pkattrno = i + 1;
-		Oid		lefttype,
-				righttype;
-		Oid		operator = eq_oprs[i];
-		Oid		opfamily = idx_rel->rd_opfamily[i];
-		int  strat;
-		RegProcedure regop = get_opcode(operator);
 
-		get_op_opfamily_properties(operator, opfamily, false, &strat,
-								   &lefttype, &righttype);
-		ScanKeyEntryInitialize(&skeys[i], 0, pkattrno, strat, righttype,
-							   idx_rel->rd_indcollation[i], regop,
+		ScanKeyEntryInitialize(&skeys[i], 0, pkattrno, riinfo->strats[i], riinfo->subtypes[i],
+							   idx_rel->rd_indcollation[i], riinfo->regops[i],
 							   pk_vals[i]);
 	}
 }
@@ -585,7 +616,15 @@ RI_FKey_check(TriggerData *trigdata)
 		idxrel = index_open(idxoid, RowShareLock);
 		num_pk = IndexRelationGetNumberOfKeyAttributes(idxrel);
 
-		build_scankeys_from_cache(riinfo, pk_rel, fk_rel, idxrel, num_pk,
+		Assert(num_pk == riinfo->nkeys);
+
+		/* If Fast-path metadata hasn't been populated, do it now */
+		if (!riinfo->fpmeta_valid)
+			ri_populate_fastpath_metadata(riinfo->constraint_id,
+										  pk_rel, fk_rel, idxrel);
+		Assert(riinfo->fpmeta_valid);
+
+		build_scankeys_from_cache(riinfo, pk_rel, fk_rel, idxrel,
 								  pk_vals, pk_nulls, skey);
 
 		scan = index_beginscan(pk_rel, idxrel, GetActiveSnapshot(), NULL, riinfo->nkeys, 0);
@@ -2665,6 +2704,7 @@ ri_LoadConstraintInfo(Oid constraintOid)
 	dclist_push_tail(&ri_constraint_cache_valid_list, &riinfo->valid_link);
 
 	riinfo->valid = true;
+	riinfo->fpmeta_valid = false;
 
 	return riinfo;
 }
