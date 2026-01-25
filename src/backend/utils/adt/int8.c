@@ -20,6 +20,7 @@
 #include "common/int.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
 #include "optimizer/optimizer.h"
@@ -854,6 +855,21 @@ int8inc_support(PG_FUNCTION_ARGS)
 				newagg->location = -1;
 
 				PG_RETURN_POINTER(newagg);
+			}
+
+			/* Replace constant NULL argument with '0'::bigint */
+			if (IsA(arg, Const) && ((Const *) arg)->constisnull)
+			{
+				Const	   *newconst;
+
+				newconst = makeConst(INT8OID,
+									 -1,
+									 InvalidOid,
+									 sizeof(int64),
+									 Int64GetDatum(0),
+									 false,
+									 true);
+				PG_RETURN_POINTER(newconst);
 			}
 		}
 	}

@@ -1145,7 +1145,7 @@ select count(not_null_col) from agg_simplify;
 explain (costs off, verbose)
 select count('bananas') from agg_simplify;
 
--- Ensure count(null) isn't optimized
+-- Ensure count(null) is replaced with '0'::bigint
 explain (costs off, verbose)
 select count(null) from agg_simplify;
 

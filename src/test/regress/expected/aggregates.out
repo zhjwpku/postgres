@@ -2922,16 +2922,15 @@ select count('bananas') from agg_simplify;
          Output: a, not_null_col, nullable_col
 (4 rows)
 
--- Ensure count(null) isn't optimized
+-- Ensure count(null) is replaced with '0'::bigint
 explain (costs off, verbose)
 select count(null) from agg_simplify;
-                  QUERY PLAN                   
------------------------------------------------
- Aggregate
-   Output: count(NULL::unknown)
-   ->  Seq Scan on public.agg_simplify
-         Output: a, not_null_col, nullable_col
-(4 rows)
+         QUERY PLAN          
+-----------------------------
+ Result
+   Output: '0'::bigint
+   Replaces: MinMaxAggregate
+(3 rows)
 
 -- Ensure count(nullable_col) does not use count(*)
 explain (costs off, verbose)
