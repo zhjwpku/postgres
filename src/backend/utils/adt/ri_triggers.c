@@ -196,6 +196,8 @@ typedef struct RI_CompareHashEntry
 	FmgrInfo	cast_func_finfo;	/* in case we must coerce input */
 } RI_CompareHashEntry;
 
+#define RI_FASTPATH_BATCH_SIZE	64
+
 /*
  * RI_FastPathEntry
  *		Per-constraint cache of resources needed by ri_FastPathCheck().
@@ -216,6 +218,12 @@ typedef struct RI_FastPathEntry
 	/* For when IsolationUsesXactSnapshot() is true */
 	Snapshot	xact_snap;
 	IndexScanDesc xact_scan;
+
+	HeapTuple	batch[RI_FASTPATH_BATCH_SIZE];
+	int			batch_count;
+
+	/* For ri_FastPathEndBatch() */
+	const RI_ConstraintInfo *riinfo;
 } RI_FastPathEntry;
 
 /*
@@ -303,7 +311,12 @@ pg_noreturn static void ri_ReportViolation(const RI_ConstraintInfo *riinfo,
 										   TupleTableSlot *violatorslot, TupleDesc tupdesc,
 										   int queryno, bool is_restrict, bool partgone);
 static RI_FastPathEntry *ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo);
-static void ri_FastPathCleanup(void *arg);
+static void ri_FastPathEndBatch(void *arg);
+static void ri_FastPathTeardown(void);
+static void ri_FastPathBatchAdd(const RI_ConstraintInfo *riinfo,
+								Relation fk_rel, TupleTableSlot *newslot);
+static void ri_FastPathBatchFlush(RI_FastPathEntry *fpentry,
+								  Relation fk_rel);
 
 
 /*
@@ -416,8 +429,18 @@ RI_FKey_check(TriggerData *trigdata)
 	 */
 	if (ri_fastpath_is_applicable(riinfo))
 	{
-		ri_FastPathCheck(riinfo, fk_rel, newslot);
-		return PointerGetDatum(NULL);
+		if (AfterTriggerBatchIsActive())
+		{
+			/* Batched path: buffer and probe in groups */
+			ri_FastPathBatchAdd(riinfo, fk_rel, newslot);
+			return PointerGetDatum(NULL);
+		}
+		else
+		{
+			/* ALTER TABLE validation: per-row, no cache */
+			ri_FastPathCheck(riinfo, fk_rel, newslot);
+			return PointerGetDatum(NULL);
+		}
 	}
 
 	SPI_connect();
@@ -3782,13 +3805,50 @@ RI_FKey_trigger_type(Oid tgfoid)
 }
 
 /*
- * ri_FastPathCleanup
- *		Tear down all cached fast-path state.
+ * ri_FastPathEndBatch
+ *		Flush remaining rows and tear down cached state.
  *
- * Called as an AfterTriggerBatchCallback at end of batch.
+ * Registered as an AfterTriggerBatchCallback.  Note: the flush can
+ * do real work (CCI, security context switch, index probes) and can
+ * throw ERROR on a constraint violation.  If that happens,
+ * ri_FastPathTeardown never runs; ResourceOwner + XactCallback
+ * handle resource cleanup on the abort path.
  */
 static void
-ri_FastPathCleanup(void *arg)
+ri_FastPathEndBatch(void *arg)
+{
+	HASH_SEQ_STATUS status;
+	RI_FastPathEntry *entry;
+
+	if (ri_fastpath_cache == NULL)
+		return;
+
+	/* Flush any partial batches — can throw ERROR */
+	hash_seq_init(&status, ri_fastpath_cache);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		if (entry->batch_count > 0)
+		{
+			Relation fk_rel = table_open(entry->riinfo->fk_relid,
+										 AccessShareLock);
+
+			ri_FastPathBatchFlush(entry, fk_rel);
+			table_close(fk_rel, NoLock);
+		}
+	}
+
+	/* Orderly teardown */
+	ri_FastPathTeardown();
+}
+
+/*
+ * ri_FastPathTeardown
+ *		Release all cached resources (scans, relations, snapshots).
+ *
+ * Pure resource cleanup -- no user-visible side effects, no errors.
+ */
+static void
+ri_FastPathTeardown(void)
 {
 	HASH_SEQ_STATUS status;
 	RI_FastPathEntry *entry;
@@ -3951,7 +4011,7 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo)
 		/* Ensure cleanup at end of this trigger-firing batch */
 		if (!ri_fastpath_callback_registered)
 		{
-			RegisterAfterTriggerBatchCallback(ri_FastPathCleanup, NULL);
+			RegisterAfterTriggerBatchCallback(ri_FastPathEndBatch, NULL);
 			ri_fastpath_callback_registered = true;
 		}
 
@@ -3962,7 +4022,148 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo)
 							   SECURITY_NOFORCE_RLS);
 		ri_CheckPermissions(entry->pk_rel);
 		SetUserIdAndSecContext(saved_userid, saved_sec_context);
+
+		/* For ri_FastPathEndBatch() */
+		entry->riinfo = riinfo;
 	}
 
 	return entry;
+}
+
+static void
+ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
+{
+	const RI_ConstraintInfo *riinfo = fpentry->riinfo;
+	Relation	pk_rel = fpentry->pk_rel;
+	Relation	idx_rel = fpentry->idx_rel;
+	IndexScanDesc scandesc = fpentry->scandesc;
+	TupleTableSlot *slot = fpentry->slot;
+	Snapshot	snapshot = fpentry->snapshot;
+	TupleTableSlot *fk_slot;
+	Datum		pk_vals[INDEX_MAX_KEYS];
+	char		pk_nulls[INDEX_MAX_KEYS];
+	ScanKeyData skey[INDEX_MAX_KEYS];
+	Oid			saved_userid;
+	int			saved_sec_context;
+	MemoryContext oldcxt;
+
+	if (fpentry->batch_count == 0)
+		return;
+
+	if (riinfo->fpmeta == NULL)
+		ri_populate_fastpath_metadata((RI_ConstraintInfo *) riinfo,
+									  fk_rel, idx_rel);
+	Assert(riinfo->fpmeta);
+
+	CommandCounterIncrement();
+	snapshot->curcid = GetCurrentCommandId(false);
+
+	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
+	SetUserIdAndSecContext(RelationGetForm(pk_rel)->relowner,
+						   saved_sec_context |
+						   SECURITY_LOCAL_USERID_CHANGE |
+						   SECURITY_NOFORCE_RLS);
+
+	fk_slot = MakeSingleTupleTableSlot(RelationGetDescr(fk_rel),
+									   &TTSOpsHeapTuple);
+
+	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+	for (int i = 0; i < fpentry->batch_count; i++)
+	{
+		HeapTuple fktuple = fpentry->batch[i];
+		bool	found = false;
+
+		ExecStoreHeapTuple(fktuple, fk_slot, false);
+
+		ri_ExtractValues(fk_rel, fk_slot, riinfo, false, pk_vals, pk_nulls);
+		build_index_scankeys(riinfo, idx_rel, pk_vals, pk_nulls, skey);
+
+		index_rescan(scandesc, skey, riinfo->nkeys, NULL, 0);
+
+		if (index_getnext_slot(scandesc, ForwardScanDirection, slot))
+		{
+			bool	concurrently_updated;
+
+			if (ri_LockPKTuple(pk_rel, slot, snapshot,
+							   &concurrently_updated))
+			{
+				if (concurrently_updated)
+					found = recheck_matched_pk_tuple(idx_rel, skey, slot);
+				else
+					found = true;
+			}
+		}
+
+		if (found && IsolationUsesXactSnapshot())
+		{
+			IndexScanDesc xact_scan;
+			TupleTableSlot *xact_slot;
+			Snapshot	xact_snap = GetTransactionSnapshot();
+
+			xact_slot = table_slot_create(pk_rel, NULL);
+			xact_scan = index_beginscan(pk_rel, idx_rel,
+										xact_snap, NULL,
+										riinfo->nkeys, 0);
+			index_rescan(xact_scan, skey, riinfo->nkeys, NULL, 0);
+
+			if (!index_getnext_slot(xact_scan, ForwardScanDirection,
+									xact_slot))
+				found = false;
+
+			index_endscan(xact_scan);
+			ExecDropSingleTupleTableSlot(xact_slot);
+		}
+
+		/*
+		 * Report immediately.  ri_ReportViolation calls ereport(ERROR)
+		 * which doesn't return, so remaining batch items and cleanup
+		 * are handled by the error path (ResourceOwner + XactCallback).
+		 */
+		if (!found)
+			ri_ReportViolation(riinfo, pk_rel, fk_rel,
+							   fk_slot, NULL,
+							   RI_PLAN_CHECK_LOOKUPPK, false, false);
+	}
+
+	MemoryContextSwitchTo(oldcxt);
+	SetUserIdAndSecContext(saved_userid, saved_sec_context);
+
+	/* Free materialized tuples and reset */
+	for (int i = 0; i < fpentry->batch_count; i++)
+		heap_freetuple(fpentry->batch[i]);
+
+	fpentry->batch_count = 0;
+
+	ExecDropSingleTupleTableSlot(fk_slot);
+}
+
+/*
+ * ri_FastPathBatchAdd
+ *		Buffer a FK row for batched probing.
+ *
+ * Adds the row to the batch buffer.  When the buffer is full, flushes
+ * all buffered rows by probing the PK index.  Any violation is reported
+ * immediately during the flush via ri_ReportViolation (which does not
+ * return).
+ *
+ * The batch is also flushed at end of trigger-firing cycle via
+ * ri_FastPathTeardown.
+ */
+static void
+ri_FastPathBatchAdd(const RI_ConstraintInfo *riinfo,
+					Relation fk_rel, TupleTableSlot *newslot)
+{
+	RI_FastPathEntry *fpentry;
+	MemoryContext oldcxt;
+
+	fpentry = ri_FastPathGetEntry(riinfo);
+
+	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+	fpentry->batch[fpentry->batch_count] =
+		ExecCopySlotHeapTuple(newslot);
+	fpentry->batch_count++;
+	MemoryContextSwitchTo(oldcxt);
+
+	if (fpentry->batch_count >= RI_FASTPATH_BATCH_SIZE)
+		ri_FastPathBatchFlush(fpentry, fk_rel);
 }

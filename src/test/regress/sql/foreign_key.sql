@@ -2556,3 +2556,24 @@ INSERT INTO fp_fk_subxact VALUES (1);
 COMMIT;
 SELECT * FROM fp_fk_subxact;
 DROP TABLE fp_fk_subxact, fp_pk_subxact;
+
+-- Multi-column FK: exercises batched per-row probing with composite keys
+CREATE TABLE fp_pk_multi (a int, b int, PRIMARY KEY (a, b));
+INSERT INTO fp_pk_multi SELECT i, i FROM generate_series(1, 100) i;
+CREATE TABLE fp_fk_multi (x int, a int, b int,
+    FOREIGN KEY (a, b) REFERENCES fp_pk_multi);
+INSERT INTO fp_fk_multi SELECT i, i, i FROM generate_series(1, 100) i;
+INSERT INTO fp_fk_multi VALUES (1, 999, 999);
+DROP TABLE fp_fk_multi, fp_pk_multi;
+
+-- Deferred constraint: batch flushed at COMMIT, not at statement end
+CREATE TABLE fp_pk_commit (a int PRIMARY KEY);
+CREATE TABLE fp_fk_commit (a int REFERENCES fp_pk_commit
+    DEFERRABLE INITIALLY DEFERRED);
+INSERT INTO fp_pk_commit VALUES (1);
+BEGIN;
+INSERT INTO fp_fk_commit VALUES (1);
+INSERT INTO fp_fk_commit VALUES (1);
+INSERT INTO fp_fk_commit VALUES (999);
+COMMIT;
+DROP TABLE fp_fk_commit, fp_pk_commit;
