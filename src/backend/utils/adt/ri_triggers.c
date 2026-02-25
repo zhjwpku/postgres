@@ -224,6 +224,10 @@ typedef struct RI_FastPathEntry
 
 	/* For ri_FastPathEndBatch() */
 	const RI_ConstraintInfo *riinfo;
+
+	/* For ri_FastPathFlushArray() */
+	Datum		search_vals[RI_FASTPATH_BATCH_SIZE];
+	bool		matched[RI_FASTPATH_BATCH_SIZE];
 } RI_FastPathEntry;
 
 /*
@@ -315,6 +319,10 @@ static void ri_FastPathEndBatch(void *arg);
 static void ri_FastPathTeardown(void);
 static void ri_FastPathBatchAdd(const RI_ConstraintInfo *riinfo,
 								Relation fk_rel, TupleTableSlot *newslot);
+static void ri_FastPathFlushArray(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
+								  const RI_ConstraintInfo *riinfo, Relation fk_rel);
+static void ri_FastPathFlushLoop(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
+								 const RI_ConstraintInfo *riinfo, Relation fk_rel);
 static void ri_FastPathBatchFlush(RI_FastPathEntry *fpentry,
 								  Relation fk_rel);
 
@@ -4003,22 +4011,236 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo)
 	return entry;
 }
 
+/*
+ * ri_FastPathFlushLoop
+ *		Multi-column fallback: probe the index once per buffered row.
+ *
+ * Used for composite foreign keys where SK_SEARCHARRAY does not
+ * apply.
+ */
+static void
+ri_FastPathFlushLoop(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
+					 const RI_ConstraintInfo *riinfo, Relation fk_rel)
+{
+	Relation	pk_rel = fpentry->pk_rel;
+	Relation	idx_rel = fpentry->idx_rel;
+	IndexScanDesc scandesc = fpentry->scandesc;
+	TupleTableSlot *slot = fpentry->slot;
+	Snapshot	snapshot = fpentry->snapshot;
+	Datum		pk_vals[INDEX_MAX_KEYS];
+	char		pk_nulls[INDEX_MAX_KEYS];
+	ScanKeyData skey[INDEX_MAX_KEYS];
+
+	for (int i = 0; i < fpentry->batch_count; i++)
+	{
+		bool	found = false;
+
+		ExecStoreHeapTuple(fpentry->batch[i], fk_slot, false);
+
+		ri_ExtractValues(fk_rel, fk_slot, riinfo, false, pk_vals, pk_nulls);
+		build_index_scankeys(riinfo, idx_rel, pk_vals, pk_nulls, skey);
+		found = ri_FastPathProbeOne(pk_rel, idx_rel, scandesc,
+									fpentry->xact_scan, slot,
+									snapshot, fpentry->xact_snap,
+									riinfo, skey, riinfo->nkeys,
+									true);
+
+		if (!found)
+			ri_ReportViolation(riinfo, pk_rel, fk_rel,
+							   fk_slot, NULL,
+							   RI_PLAN_CHECK_LOOKUPPK, false, false);
+	}
+}
+
+/*
+ * ri_FastPathFlushArray
+ *		Single-column fast path using SK_SEARCHARRAY.
+ *
+ * Builds an array of FK values and does one index scan with
+ * SK_SEARCHARRAY.  The index AM sorts and deduplicates the array
+ * internally, then walks matching leaf pages in order.  Each
+ * matched PK tuple is locked and rechecked as before; a matched[]
+ * bitmap tracks which batch items were satisfied.
+ */
+static void
+ri_FastPathFlushArray(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
+					  const RI_ConstraintInfo *riinfo, Relation fk_rel)
+{
+	FastPathMeta *fpmeta = riinfo->fpmeta;
+	Relation	pk_rel = fpentry->pk_rel;
+	Relation	idx_rel = fpentry->idx_rel;
+	IndexScanDesc scandesc = fpentry->scandesc;
+	TupleTableSlot *slot = fpentry->slot;
+	Snapshot	snapshot = fpentry->snapshot;
+	Datum	   *search_vals = fpentry->search_vals;
+	bool	   *matched = fpentry->matched;
+	int			nvals = fpentry->batch_count;
+	Datum		pk_vals[INDEX_MAX_KEYS];
+	char		pk_nulls[INDEX_MAX_KEYS];
+	ScanKeyData skey[1];
+	RI_CompareHashEntry *entry;
+	Oid			elem_type;
+	int16		elem_len;
+	bool		elem_byval;
+	char		elem_align;
+	ArrayType  *arr;
+	MemoryContext oldcxt;
+
+	Assert(fpmeta);
+
+	memset(matched, 0, nvals * sizeof(bool));
+
+	/*
+	 * Extract and cast FK values.  We need the PK-side type for
+	 * the array element type since the scan key compares against
+	 * the index which stores PK-typed values.
+	 */
+	entry = fpmeta->compare_entries[0];
+	for (int i = 0; i < nvals; i++)
+	{
+		ExecStoreHeapTuple(fpentry->batch[i], fk_slot, false);
+		ri_ExtractValues(fk_rel, fk_slot, riinfo, false, pk_vals, pk_nulls);
+
+		/* Cast if needed (e.g. int8 FK -> numeric PK) */
+		if (OidIsValid(entry->cast_func_finfo.fn_oid))
+			search_vals[i] = FunctionCall3(&entry->cast_func_finfo,
+										   pk_vals[0],
+										   Int32GetDatum(-1),
+										   BoolGetDatum(false));
+		else
+			search_vals[i] = pk_vals[0];
+	}
+
+	/*
+	 * Array element type must match the operator's right-hand input
+	 * type, which is what the index comparison expects on the search
+	 * side.  ri_populate_fastpath_metadata() stores exactly this via
+	 * get_op_opfamily_properties(), which returns the operator's
+	 * right-hand type as the subtype for cross-type operators (e.g.
+	 * int8 for int48eq) and the common type for same-type operators.
+	 */
+	elem_type = fpmeta->subtypes[0];
+	Assert(OidIsValid(elem_type));
+	get_typlenbyvalalign(elem_type, &elem_len, &elem_byval, &elem_align);
+
+	arr = construct_array(search_vals, nvals,
+						  elem_type, elem_len, elem_byval, elem_align);
+
+	/*
+	 * Build scan key with SK_SEARCHARRAY.  The btree code will
+	 * internally sort and deduplicate, then walk leaf pages in order.
+	 */
+	ScanKeyEntryInitialize(&skey[0],
+						   SK_SEARCHARRAY,
+						   1,				/* attno */
+						   fpmeta->strats[0],
+						   fpmeta->subtypes[0],
+						   idx_rel->rd_indcollation[0],
+						   fpmeta->regops[0],
+						   PointerGetDatum(arr));
+
+	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+
+	index_rescan(scandesc, skey, 1, NULL, 0);
+
+	/*
+	 * Walk all matches.  The btree returns them in index order.
+	 * For each match, find which batch item(s) it satisfies.
+	 */
+	while (index_getnext_slot(scandesc, ForwardScanDirection, slot))
+	{
+		Datum		found_val;
+		bool		found_null;
+		bool		concurrently_updated;
+		ScanKeyData recheck_skey[1];
+		bool		recheck_skey_valid = false;
+
+		if (!ri_LockPKTuple(pk_rel, slot, snapshot, &concurrently_updated))
+			continue;
+
+		/* Extract the PK value from the matched and locked tuple */
+		found_val = slot_getattr(slot, riinfo->pk_attnums[0], &found_null);
+		Assert(!found_null);
+
+		if (concurrently_updated)
+		{
+			/*
+			 * Build a single-key scankey for recheck.  We need the
+			 * actual PK value that was found, not the FK search value.
+			 */
+			ScanKeyEntryInitialize(&recheck_skey[0], 0, 1,
+								   fpmeta->strats[0],
+								   fpmeta->subtypes[0],
+								   idx_rel->rd_indcollation[0],
+								   fpmeta->regops[0],
+								   found_val);
+			recheck_skey_valid = true;
+			if (!recheck_matched_pk_tuple(idx_rel, recheck_skey, slot))
+				continue;
+		}
+
+		/* RR/SERIALIZABLE crosscheck */
+		if (IsolationUsesXactSnapshot())
+		{
+			IndexScanDesc xact_scan = fpentry->xact_scan;
+
+			if (!recheck_skey_valid)
+				ScanKeyEntryInitialize(&recheck_skey[0], 0, 1,
+									   fpmeta->strats[0],
+									   fpmeta->subtypes[0],
+									   idx_rel->rd_indcollation[0],
+									   fpmeta->regops[0],
+									   found_val);
+
+			index_rescan(xact_scan, recheck_skey, 1, NULL, 0);
+			if (!index_getnext_slot(xact_scan, ForwardScanDirection, slot))
+				continue;
+		}
+
+		/*
+		 * Linear scan to mark all batch items matching this PK value.
+		 * O(batch_size) per match, O(batch_size^2) worst case -- fine
+		 * for the current batch size of 64.
+		 */
+		for (int i = 0; i < nvals; i++)
+		{
+			if (!matched[i] &&
+				DatumGetBool(FunctionCall2Coll(&entry->eq_opr_finfo,
+											   idx_rel->rd_indcollation[0],
+											   found_val,
+											   search_vals[i])))
+				matched[i] = true;
+		}
+	}
+
+	/* Report first unmatched row */
+	for (int i = 0; i < nvals; i++)
+	{
+		if (!matched[i])
+		{
+			ExecStoreHeapTuple(fpentry->batch[i], fk_slot, false);
+			ri_ReportViolation(riinfo, pk_rel, fk_rel,
+							   fk_slot, NULL,
+							   RI_PLAN_CHECK_LOOKUPPK, false, false);
+		}
+	}
+
+	MemoryContextSwitchTo(oldcxt);
+
+	pfree(arr);
+}
+
+
 static void
 ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 {
 	const RI_ConstraintInfo *riinfo = fpentry->riinfo;
 	Relation	pk_rel = fpentry->pk_rel;
 	Relation	idx_rel = fpentry->idx_rel;
-	IndexScanDesc scandesc = fpentry->scandesc;
-	TupleTableSlot *slot = fpentry->slot;
 	Snapshot	snapshot = fpentry->snapshot;
 	TupleTableSlot *fk_slot;
-	Datum		pk_vals[INDEX_MAX_KEYS];
-	char		pk_nulls[INDEX_MAX_KEYS];
-	ScanKeyData skey[INDEX_MAX_KEYS];
 	Oid			saved_userid;
 	int			saved_sec_context;
-	MemoryContext oldcxt;
 
 	if (fpentry->batch_count == 0)
 		return;
@@ -4040,65 +4262,11 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 	fk_slot = MakeSingleTupleTableSlot(RelationGetDescr(fk_rel),
 									   &TTSOpsHeapTuple);
 
-	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
-	for (int i = 0; i < fpentry->batch_count; i++)
-	{
-		HeapTuple fktuple = fpentry->batch[i];
-		bool	found = false;
+	if (riinfo->nkeys == 1)
+		ri_FastPathFlushArray(fpentry, fk_slot, riinfo, fk_rel);
+	else
+		ri_FastPathFlushLoop(fpentry, fk_slot, riinfo, fk_rel);
 
-		ExecStoreHeapTuple(fktuple, fk_slot, false);
-
-		ri_ExtractValues(fk_rel, fk_slot, riinfo, false, pk_vals, pk_nulls);
-		build_index_scankeys(riinfo, idx_rel, pk_vals, pk_nulls, skey);
-
-		index_rescan(scandesc, skey, riinfo->nkeys, NULL, 0);
-
-		if (index_getnext_slot(scandesc, ForwardScanDirection, slot))
-		{
-			bool	concurrently_updated;
-
-			if (ri_LockPKTuple(pk_rel, slot, snapshot,
-							   &concurrently_updated))
-			{
-				if (concurrently_updated)
-					found = recheck_matched_pk_tuple(idx_rel, skey, slot);
-				else
-					found = true;
-			}
-		}
-
-		if (found && IsolationUsesXactSnapshot())
-		{
-			IndexScanDesc xact_scan;
-			TupleTableSlot *xact_slot;
-			Snapshot	xact_snap = GetTransactionSnapshot();
-
-			xact_slot = table_slot_create(pk_rel, NULL);
-			xact_scan = index_beginscan(pk_rel, idx_rel,
-										xact_snap, NULL,
-										riinfo->nkeys, 0);
-			index_rescan(xact_scan, skey, riinfo->nkeys, NULL, 0);
-
-			if (!index_getnext_slot(xact_scan, ForwardScanDirection,
-									xact_slot))
-				found = false;
-
-			index_endscan(xact_scan);
-			ExecDropSingleTupleTableSlot(xact_slot);
-		}
-
-		/*
-		 * Report immediately.  ri_ReportViolation calls ereport(ERROR)
-		 * which doesn't return, so remaining batch items and cleanup
-		 * are handled by the error path (ResourceOwner + XactCallback).
-		 */
-		if (!found)
-			ri_ReportViolation(riinfo, pk_rel, fk_rel,
-							   fk_slot, NULL,
-							   RI_PLAN_CHECK_LOOKUPPK, false, false);
-	}
-
-	MemoryContextSwitchTo(oldcxt);
 	SetUserIdAndSecContext(saved_userid, saved_sec_context);
 
 	/* Free materialized tuples and reset */

@@ -2577,3 +2577,20 @@ INSERT INTO fp_fk_commit VALUES (1);
 INSERT INTO fp_fk_commit VALUES (999);
 COMMIT;
 DROP TABLE fp_fk_commit, fp_pk_commit;
+
+-- Cross-type FK with bulk insert: int8 FK referencing int4 PK,
+-- values cast during array construction
+CREATE TABLE fp_pk_cross (a int4 PRIMARY KEY);
+INSERT INTO fp_pk_cross SELECT generate_series(1, 200);
+CREATE TABLE fp_fk_cross (a int8 REFERENCES fp_pk_cross);
+INSERT INTO fp_fk_cross SELECT generate_series(1, 200);
+INSERT INTO fp_fk_cross VALUES (999);
+DROP TABLE fp_fk_cross, fp_pk_cross;
+
+-- Duplicate FK values: when using the batched SAOP path, every
+-- row must be recognized as satisfied, not just the first match
+CREATE TABLE fp_pk_dup (a int PRIMARY KEY);
+INSERT INTO fp_pk_dup VALUES (1);
+CREATE TABLE fp_fk_dup (a int REFERENCES fp_pk_dup);
+INSERT INTO fp_fk_dup SELECT 1 FROM generate_series(1, 100);
+DROP TABLE fp_fk_dup, fp_pk_dup;
