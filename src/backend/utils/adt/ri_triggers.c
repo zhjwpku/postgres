@@ -200,7 +200,7 @@ typedef struct RI_CompareHashEntry
 
 /*
  * RI_FastPathEntry
- *		Per-constraint cache of resources needed by ri_FastPathCheck().
+ *		Per-constraint cache of resources needed by ri_FastPathBatchFlush().
  *
  * One entry per constraint, keyed by pg_constraint OID.  Created lazily
  * by ri_FastPathGetEntry() on first use within a trigger-firing batch
@@ -2722,10 +2722,14 @@ ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 
 /*
  * ri_FastPathCheck
- *		Perform FK existence check via direct index probe, bypassing SPI.
+ *		Perform per row FK existence check via direct index probe,
+ *		bypassing SPI.
  *
  * If no matching PK row exists, report the violation via ri_ReportViolation(),
  * otherwise, the function returns normally.
+ *
+ * Note: This is only used by the ALTER TABLE validation path. Other paths use
+ * ri_FastPathBatchAdd().
  */
 static void
 ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
@@ -2744,8 +2748,6 @@ ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
 	int			saved_sec_context;
 	Snapshot	snapshot;
 	Snapshot	xact_snap = NULL;
-	bool		use_cache;
-	RI_FastPathEntry *fpentry = NULL;
 
 	/*
 	 * Use the per-batch cache only if we're inside the after-trigger
@@ -2753,10 +2755,7 @@ ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
 	 * ... ADD FOREIGN KEY validation, triggers are called directly and the
 	 * callback would never run, leaking resources.
 	 */
-	use_cache = AfterTriggerBatchIsActive();
-
-	if (use_cache)
-		fpentry = ri_FastPathGetEntry(riinfo);
+	Assert(!AfterTriggerBatchIsActive());
 
 	/*
 	 * Advance the command counter so the snapshot sees the effects of prior
@@ -2764,36 +2763,14 @@ ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
 	 * ri_PerformCheck().
 	 */
 	CommandCounterIncrement();
-	if (use_cache)
-	{
-		/*
-		 * The snapshot was registered once when the cache entry was created.
-		 * Patch curcid so it reflects the effects of prior triggers in this
-		 * statement.  We deliberately do not call GetLatestSnapshot() again:
-		 * the xmin/xmax/xip fields do not need refreshing because any PK row
-		 * we need to see was either already visible when the batch started or
-		 * will be found via the tuple-lock wait (LockTupleKeyShare).
-		 */
-		Assert(fpentry && fpentry->snapshot != NULL);
-		snapshot = fpentry->snapshot;
-		snapshot->curcid = GetCurrentCommandId(false);
-		xact_scan = fpentry->xact_scan;
-		xact_snap = fpentry->xact_snap;
-		pk_rel = fpentry->pk_rel;
-		idx_rel = fpentry->idx_rel;
-		scandesc = fpentry->scandesc;
-		slot = fpentry->slot;
-	}
-	else
-	{
-		snapshot = RegisterSnapshot(GetLatestSnapshot());
-		pk_rel = table_open(riinfo->pk_relid, RowShareLock);
-		idx_rel = index_open(riinfo->conindid, AccessShareLock);
-		scandesc = index_beginscan(pk_rel, idx_rel,
-								   snapshot, NULL,
-								   riinfo->nkeys, 0);
-		slot = table_slot_create(pk_rel, NULL);
-	}
+
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	pk_rel = table_open(riinfo->pk_relid, RowShareLock);
+	idx_rel = index_open(riinfo->conindid, AccessShareLock);
+	scandesc = index_beginscan(pk_rel, idx_rel,
+							   snapshot, NULL,
+							   riinfo->nkeys, 0);
+	slot = table_slot_create(pk_rel, NULL);
 
 	if (riinfo->fpmeta == NULL)
 		ri_populate_fastpath_metadata((RI_ConstraintInfo *) riinfo,
@@ -2805,14 +2782,13 @@ ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
 						   saved_sec_context |
 						   SECURITY_LOCAL_USERID_CHANGE |
 						   SECURITY_NOFORCE_RLS);
-	if (!use_cache)
-		ri_CheckPermissions(pk_rel);
+	ri_CheckPermissions(pk_rel);
 
 	ri_ExtractValues(fk_rel, newslot, riinfo, false, pk_vals, pk_nulls);
 	build_index_scankeys(riinfo, idx_rel, pk_vals, pk_nulls, skey);
 	found = ri_FastPathProbeOne(pk_rel, idx_rel, scandesc, xact_scan,
 								slot, snapshot, xact_snap, riinfo,
-								skey, riinfo->nkeys, use_cache);
+								skey, riinfo->nkeys, false);
 	if (!found)
 		ri_ReportViolation(riinfo, pk_rel, fk_rel,
 						   newslot, NULL,
@@ -2820,14 +2796,11 @@ ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
 	SetUserIdAndSecContext(saved_userid, saved_sec_context);
 
 	/* Non-cached path: clean up per-invocation resources */
-	if (!use_cache)
-	{
-		index_endscan(scandesc);
-		index_close(idx_rel, NoLock);
-		table_close(pk_rel, NoLock);
-		ExecDropSingleTupleTableSlot(slot);
-		UnregisterSnapshot(snapshot);
-	}
+	index_endscan(scandesc);
+	index_close(idx_rel, NoLock);
+	table_close(pk_rel, NoLock);
+	ExecDropSingleTupleTableSlot(slot);
+	UnregisterSnapshot(snapshot);
 }
 
 /*
@@ -3987,7 +3960,7 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo)
 
 		/*
 		 * Register an initial snapshot.  Its curcid will be patched in place
-		 * on each subsequent row (see ri_FastPathCheck()), avoiding per-row
+		 * on each subsequent row (see ri_FastPathBatchFlush()), avoiding per-row
 		 * GetSnapshotData() overhead.
 		 */
 		entry->snapshot = RegisterSnapshot(GetLatestSnapshot());
