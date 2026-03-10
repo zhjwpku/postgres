@@ -213,8 +213,9 @@ typedef struct RI_FastPathEntry
 	Relation	idx_rel;
 	IndexScanDesc scandesc;
 	TupleTableSlot *slot;
+	TupleTableSlot *fk_slot;
 	Snapshot	snapshot;		/* registered snapshot for the scan */
- 
+
 	/* For when IsolationUsesXactSnapshot() is true */
 	Snapshot	xact_snap;
 	IndexScanDesc xact_scan;
@@ -310,7 +311,7 @@ pg_noreturn static void ri_ReportViolation(const RI_ConstraintInfo *riinfo,
 										   Relation pk_rel, Relation fk_rel,
 										   TupleTableSlot *violatorslot, TupleDesc tupdesc,
 										   int queryno, bool is_restrict, bool partgone);
-static RI_FastPathEntry *ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo);
+static RI_FastPathEntry *ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel);
 static void ri_FastPathEndBatch(void *arg);
 static void ri_FastPathTeardown(void);
 static void ri_FastPathBatchAdd(const RI_ConstraintInfo *riinfo,
@@ -3843,6 +3844,8 @@ ri_FastPathTeardown(void)
 			table_close(entry->pk_rel, NoLock);
 		if (entry->slot)
 			ExecDropSingleTupleTableSlot(entry->slot);
+		if (entry->fk_slot)
+			ExecDropSingleTupleTableSlot(entry->fk_slot);
 		if (entry->snapshot)
 			UnregisterSnapshot(entry->snapshot);
 		if (entry->xact_snap)
@@ -3901,7 +3904,7 @@ ri_FastPathSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
  * index_rescan() with new keys.
  */
 static RI_FastPathEntry *
-ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo)
+ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
 {
 	RI_FastPathEntry *entry;
 	bool		found;
@@ -3966,6 +3969,8 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo)
 		entry->snapshot = RegisterSnapshot(GetLatestSnapshot());
 
 		entry->slot = table_slot_create(entry->pk_rel, NULL);
+		entry->fk_slot = MakeSingleTupleTableSlot(RelationGetDescr(fk_rel),
+												  &TTSOpsHeapTuple);
 
 		entry->scandesc = index_beginscan(entry->pk_rel, entry->idx_rel,
 										  entry->snapshot, NULL,
@@ -4012,7 +4017,7 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 	IndexScanDesc scandesc = fpentry->scandesc;
 	TupleTableSlot *slot = fpentry->slot;
 	Snapshot	snapshot = fpentry->snapshot;
-	TupleTableSlot *fk_slot;
+	TupleTableSlot *fk_slot = fpentry->fk_slot;
 	Datum		pk_vals[INDEX_MAX_KEYS];
 	char		pk_nulls[INDEX_MAX_KEYS];
 	ScanKeyData skey[INDEX_MAX_KEYS];
@@ -4036,9 +4041,6 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 						   saved_sec_context |
 						   SECURITY_LOCAL_USERID_CHANGE |
 						   SECURITY_NOFORCE_RLS);
-
-	fk_slot = MakeSingleTupleTableSlot(RelationGetDescr(fk_rel),
-									   &TTSOpsHeapTuple);
 
 	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
 	for (int i = 0; i < fpentry->batch_count; i++)
@@ -4104,10 +4106,7 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 	/* Free materialized tuples and reset */
 	for (int i = 0; i < fpentry->batch_count; i++)
 		heap_freetuple(fpentry->batch[i]);
-
 	fpentry->batch_count = 0;
-
-	ExecDropSingleTupleTableSlot(fk_slot);
 }
 
 /*
@@ -4129,7 +4128,7 @@ ri_FastPathBatchAdd(const RI_ConstraintInfo *riinfo,
 	RI_FastPathEntry *fpentry;
 	MemoryContext oldcxt;
 
-	fpentry = ri_FastPathGetEntry(riinfo);
+	fpentry = ri_FastPathGetEntry(riinfo, fk_rel);
 
 	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
 	fpentry->batch[fpentry->batch_count] =
