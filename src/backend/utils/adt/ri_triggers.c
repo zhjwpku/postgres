@@ -196,6 +196,23 @@ typedef struct RI_CompareHashEntry
 	FmgrInfo	cast_func_finfo;	/* in case we must coerce input */
 } RI_CompareHashEntry;
 
+/*
+ * RI_FastPathEntry
+ *		Per-constraint cache of resources needed by ri_FastPathCheckCached().
+ *
+ * One entry per constraint, keyed by pg_constraint OID.  Created lazily
+ * by ri_FastPathGetEntry() on first use within a trigger-firing batch
+ * and torn down by ri_FastPathTeardown() at batch end.
+ */
+typedef struct RI_FastPathEntry
+{
+	Oid			conoid;			/* hash key: pg_constraint OID */
+	Relation	pk_rel;
+	Relation	idx_rel;
+	IndexScanDesc scandesc;
+	TupleTableSlot *slot;
+	Snapshot	snapshot;		/* registered snapshot for the scan */
+} RI_FastPathEntry;
 
 /*
  * Local data
@@ -205,6 +222,8 @@ static HTAB *ri_query_cache = NULL;
 static HTAB *ri_compare_cache = NULL;
 static dclist_head ri_constraint_cache_valid_list;
 
+static HTAB *ri_fastpath_cache = NULL;
+static bool ri_fastpath_callback_registered = false;
 
 /*
  * Local function prototypes
@@ -255,6 +274,8 @@ static bool ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 							bool detectNewRows, int expect_OK);
 static void ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
 							 Relation fk_rel, TupleTableSlot *newslot);
+static void ri_FastPathCheckCached(const RI_ConstraintInfo *riinfo,
+								   Relation fk_rel, TupleTableSlot *newslot);
 static bool ri_FastPathProbeOne(Relation pk_rel, Relation idx_rel,
 								IndexScanDesc scandesc, TupleTableSlot *slot,
 								Snapshot snapshot, const RI_ConstraintInfo *riinfo,
@@ -277,6 +298,9 @@ pg_noreturn static void ri_ReportViolation(const RI_ConstraintInfo *riinfo,
 										   Relation pk_rel, Relation fk_rel,
 										   TupleTableSlot *violatorslot, TupleDesc tupdesc,
 										   int queryno, bool is_restrict, bool partgone);
+static RI_FastPathEntry *ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo,
+											 Relation fk_rel);
+static void ri_FastPathTeardown(void *arg);
 
 
 /*
@@ -387,12 +411,16 @@ RI_FKey_check(TriggerData *trigdata)
 	 * index scan + tuple lock.  This is semantically equivalent to
 	 * the SPI path below but avoids the per-row executor overhead.
 	 *
-	 * ri_FastPathCheck() reports the violation itself (via ereport)
-	 * if no matching PK row is found, so it only returns on success.
+	 * ri_FastPathCheckCached and ri_FastPathCheck() reports the violation
+	 * themselves if no matching PK row is found, so it only returns on
+	 * success.
 	 */
 	if (ri_fastpath_is_applicable(riinfo))
 	{
-		ri_FastPathCheck(riinfo, fk_rel, newslot);
+		if (AfterTriggerBatchIsActive())
+			ri_FastPathCheckCached(riinfo, fk_rel, newslot);
+		else
+			ri_FastPathCheck(riinfo, fk_rel, newslot);
 		return PointerGetDatum(NULL);
 	}
 
@@ -2743,6 +2771,73 @@ ri_FastPathCheck(const RI_ConstraintInfo *riinfo,
 }
 
 /*
+ * ri_FastPathCheckCached
+ *		Cached-resource variant of ri_FastPathCheck for use within the
+ *		after-trigger framework.
+ *
+ * Uses the per-batch cache (RI_FastPathEntry) to avoid per-row relation
+ * open/close, scan begin/end, and snapshot registration.  The snapshot's
+ * curcid is patched each call so the scan sees effects of prior triggers.
+ *
+ * Like ri_FastPathCheck, reports the violation via ri_ReportViolation()
+ * if no matching PK row is found.
+ */
+static void
+ri_FastPathCheckCached(const RI_ConstraintInfo *riinfo,
+					   Relation fk_rel, TupleTableSlot *newslot)
+{
+	RI_FastPathEntry *fpentry = ri_FastPathGetEntry(riinfo, fk_rel);
+	Relation	pk_rel = fpentry->pk_rel;
+	Relation	idx_rel = fpentry->idx_rel;
+	IndexScanDesc scandesc = fpentry->scandesc;
+	Snapshot	snapshot = fpentry->snapshot;
+	TupleTableSlot *slot = fpentry->slot;
+	Datum		pk_vals[INDEX_MAX_KEYS];
+	char		pk_nulls[INDEX_MAX_KEYS];
+	ScanKeyData skey[INDEX_MAX_KEYS];
+	bool		found;
+	Oid			saved_userid;
+	int			saved_sec_context;
+	MemoryContext oldcxt;
+
+	/*
+	 * Advance the command counter and patch the cached snapshot's curcid so
+	 * the scan sees PK rows inserted by earlier triggers in this statement.
+	 */
+	CommandCounterIncrement();
+	fpentry->snapshot->curcid = GetCurrentCommandId(false);
+
+	if (riinfo->fpmeta == NULL)
+		ri_populate_fastpath_metadata((RI_ConstraintInfo *) riinfo,
+									  fk_rel, idx_rel);
+	Assert(riinfo->fpmeta);
+
+	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
+	SetUserIdAndSecContext(RelationGetForm(pk_rel)->relowner,
+						   saved_sec_context |
+						   SECURITY_LOCAL_USERID_CHANGE |
+						   SECURITY_NOFORCE_RLS);
+
+	ri_ExtractValues(fk_rel, newslot, riinfo, false, pk_vals, pk_nulls);
+	build_index_scankeys(riinfo, idx_rel, pk_vals, pk_nulls, skey);
+
+	/*
+	 * The cached scandesc lives in TopTransactionContext, but the btree AM
+	 * defers some allocations to the first index_getnext_slot call.  Ensure
+	 * those land in TopTransactionContext too.
+	 */
+	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+	found = ri_FastPathProbeOne(pk_rel, idx_rel, scandesc, slot, snapshot,
+								riinfo, skey, riinfo->nkeys);
+	MemoryContextSwitchTo(oldcxt);
+	SetUserIdAndSecContext(saved_userid, saved_sec_context);
+
+	if (!found)
+		ri_ReportViolation(riinfo, pk_rel, fk_rel, newslot, NULL,
+						   RI_PLAN_CHECK_LOOKUPPK, false, false);
+}
+
+/*
  * ri_FastPathProbeOne
  *		Probe the PK index for one set of scan keys, lock the matching
  *		tuple
@@ -3671,4 +3766,178 @@ RI_FKey_trigger_type(Oid tgfoid)
 	}
 
 	return RI_TRIGGER_NONE;
+}
+
+/*
+ * ri_FastPathTeardown
+ *		Tear down all cached fast-path state.
+ *
+ * Called as an AfterTriggerBatchCallback at end of batch.
+ */
+static void
+ri_FastPathTeardown(void *arg)
+{
+	HASH_SEQ_STATUS status;
+	RI_FastPathEntry *entry;
+
+	if (ri_fastpath_cache == NULL)
+		return;
+
+	hash_seq_init(&status, ri_fastpath_cache);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		/* Close both scans before closing idx_rel. */
+		if (entry->scandesc)
+			index_endscan(entry->scandesc);
+		if (entry->idx_rel)
+			index_close(entry->idx_rel, NoLock);
+		if (entry->pk_rel)
+			table_close(entry->pk_rel, NoLock);
+		if (entry->slot)
+			ExecDropSingleTupleTableSlot(entry->slot);
+		if (entry->snapshot)
+			UnregisterSnapshot(entry->snapshot);
+	}
+
+	hash_destroy(ri_fastpath_cache);
+	ri_fastpath_cache = NULL;
+	ri_fastpath_callback_registered = false;
+}
+
+static bool ri_fastpath_xact_callback_registered = false;
+
+static void
+ri_FastPathXactCallback(XactEvent event, void *arg)
+{
+	/*
+	 * TopTransactionContext is destroyed at end of transaction, taking the
+	 * hash table and all cached resources with it.  Just reset our static
+	 * pointers so we don't dereference freed memory.
+	 *
+	 * In the normal (non-error) path, ri_FastPathTeardown already ran via the
+	 * batch callback and did orderly teardown.  Here we're just handling the
+	 * abort path where that callback never fired.
+	 */
+	ri_fastpath_cache = NULL;
+	ri_fastpath_callback_registered = false;
+}
+
+static void
+ri_FastPathSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+						   SubTransactionId parentSubid, void *arg)
+{
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+	{
+		/*
+		 * ResourceOwner already cleaned up relations and snapshots.  Just
+		 * NULL our pointers so the still-registered batch callback becomes a
+		 * no-op.  The hash table memory in TopTransactionContext will be
+		 * freed at transaction end.
+		 */
+		ri_fastpath_cache = NULL;
+		ri_fastpath_callback_registered = false;
+	}
+}
+
+/*
+ * ri_FastPathGetEntry
+ *		Look up or create a per-batch cache entry for the given constraint.
+ *
+ * On first call for a constraint within a batch: opens pk_rel and the
+ * index, begins an index scan, allocates a result slot, and registers
+ * the cleanup callback.
+ *
+ * On subsequent calls: returns the existing entry.  Caller uses
+ * index_rescan() with new keys.
+ */
+static RI_FastPathEntry *
+ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
+{
+	RI_FastPathEntry *entry;
+	bool		found;
+
+	/* Create hash table on first use in this batch */
+	if (ri_fastpath_cache == NULL)
+	{
+		HASHCTL		ctl;
+
+		if (!ri_fastpath_xact_callback_registered)
+		{
+			RegisterXactCallback(ri_FastPathXactCallback, NULL);
+			RegisterSubXactCallback(ri_FastPathSubXactCallback, NULL);
+			ri_fastpath_xact_callback_registered = true;
+		}
+
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(RI_FastPathEntry);
+		ctl.hcxt = TopTransactionContext;
+		ri_fastpath_cache = hash_create("RI fast-path cache",
+										16,
+										&ctl,
+										HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	entry = hash_search(ri_fastpath_cache, &riinfo->constraint_id,
+						HASH_ENTER, &found);
+
+	if (!found)
+	{
+		MemoryContext oldcxt;
+		Oid		saved_userid;
+		int		saved_sec_context;
+
+		/*
+		 * Zero out non-key fields so ri_FastPathTeardown is safe if we error
+		 * out during partial initialization below.
+		 */
+		memset(((char *) entry) + offsetof(RI_FastPathEntry, pk_rel), 0,
+			   sizeof(RI_FastPathEntry) - offsetof(RI_FastPathEntry, pk_rel));
+
+		oldcxt = MemoryContextSwitchTo(TopTransactionContext);
+
+		/*
+		 * Open PK table and its unique index.
+		 *
+		 * RowShareLock on pk_rel matches what the SPI path's SELECT ... FOR
+		 * KEY SHARE would acquire as a relation-level lock. AccessShareLock
+		 * on the index is standard for index scans.
+		 *
+		 * We don't release these locks until end of transaction, matching SPI
+		 * behavior.
+		 */
+		entry->pk_rel = table_open(riinfo->pk_relid, RowShareLock);
+		entry->idx_rel = index_open(riinfo->conindid, AccessShareLock);
+
+		/*
+		 * Register an initial snapshot.  Its curcid will be patched in place
+		 * on each subsequent row (see ri_FastPathCheckCached()), avoiding
+		 * per-row GetSnapshotData() overhead.
+		 */
+		entry->snapshot = RegisterSnapshot(GetTransactionSnapshot());
+
+		entry->slot = table_slot_create(entry->pk_rel, NULL);
+
+		entry->scandesc = index_beginscan(entry->pk_rel, entry->idx_rel,
+										  entry->snapshot, NULL,
+										  riinfo->nkeys, 0);
+
+		MemoryContextSwitchTo(oldcxt);
+
+		/* Ensure cleanup at end of this trigger-firing batch */
+		if (!ri_fastpath_callback_registered)
+		{
+			RegisterAfterTriggerBatchCallback(ri_FastPathTeardown, NULL);
+			ri_fastpath_callback_registered = true;
+		}
+
+		GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
+		SetUserIdAndSecContext(RelationGetForm(entry->pk_rel)->relowner,
+							   saved_sec_context |
+							   SECURITY_LOCAL_USERID_CHANGE |
+							   SECURITY_NOFORCE_RLS);
+		ri_CheckPermissions(entry->pk_rel);
+		SetUserIdAndSecContext(saved_userid, saved_sec_context);
+	}
+
+	return entry;
 }

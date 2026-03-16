@@ -2498,3 +2498,83 @@ WITH cte AS (
 
 DROP SCHEMA fkpart13 CASCADE;
 RESET search_path;
+
+-- Tests foreign key check fast-path no-cache path.
+CREATE TABLE fp_pk_alter (a int PRIMARY KEY);
+INSERT INTO fp_pk_alter SELECT generate_series(1, 100);
+CREATE TABLE fp_fk_alter (a int);
+INSERT INTO fp_fk_alter SELECT generate_series(1, 100);
+-- Validation path: should succeed
+ALTER TABLE fp_fk_alter ADD FOREIGN KEY (a) REFERENCES fp_pk_alter;
+INSERT INTO fp_fk_alter VALUES (101);  -- should fail (constraint active)
+DROP TABLE fp_fk_alter, fp_pk_alter;
+
+-- Separate test: validation catches existing violation
+CREATE TABLE fp_pk_alter2 (a int PRIMARY KEY);
+INSERT INTO fp_pk_alter2 VALUES (1);
+CREATE TABLE fp_fk_alter2 (a int);
+INSERT INTO fp_fk_alter2 VALUES (1), (200);  -- 200 has no PK match
+ALTER TABLE fp_fk_alter2 ADD FOREIGN KEY (a) REFERENCES fp_pk_alter2;  -- should fail
+DROP TABLE fp_fk_alter2, fp_pk_alter2;
+
+-- Tests that the fast-path handles caching for multiple constraints
+CREATE TABLE fp_pk1 (a int PRIMARY KEY);
+CREATE TABLE fp_pk2 (b int PRIMARY KEY);
+INSERT INTO fp_pk1 VALUES (1);
+INSERT INTO fp_pk2 VALUES (1);
+CREATE TABLE fp_multi_fk (
+    a int REFERENCES fp_pk1,
+    b int REFERENCES fp_pk2
+);
+INSERT INTO fp_multi_fk VALUES (1, 1);  -- two constraints, one batch
+INSERT INTO fp_multi_fk VALUES (1, 2);  -- second constraint fails
+DROP TABLE fp_multi_fk, fp_pk1, fp_pk2;
+
+-- Test that fast-path cache handles deferred constraints and SET CONSTRAINTS IMMEDIATE
+CREATE TABLE fp_pk_defer (a int PRIMARY KEY);
+CREATE TABLE fp_fk_defer (a int REFERENCES fp_pk_defer DEFERRABLE INITIALLY DEFERRED);
+INSERT INTO fp_pk_defer VALUES (1), (2);
+
+BEGIN;
+INSERT INTO fp_fk_defer VALUES (1);
+INSERT INTO fp_fk_defer VALUES (2);
+SET CONSTRAINTS ALL IMMEDIATE;  -- fires batch callback here
+INSERT INTO fp_fk_defer VALUES (3);  -- should fail, also tests that cache was cleaned up
+COMMIT;
+DROP TABLE fp_pk_defer, fp_fk_defer;
+
+-- Subtransaction abort: cached state must be invalidated on ROLLBACK TO
+CREATE TABLE fp_pk_subxact (a int PRIMARY KEY);
+CREATE TABLE fp_fk_subxact (a int REFERENCES fp_pk_subxact);
+INSERT INTO fp_pk_subxact VALUES (1), (2);
+BEGIN;
+INSERT INTO fp_fk_subxact VALUES (1);
+SAVEPOINT sp1;
+INSERT INTO fp_fk_subxact VALUES (2);
+ROLLBACK TO sp1;
+INSERT INTO fp_fk_subxact VALUES (1);
+COMMIT;
+SELECT * FROM fp_fk_subxact;
+DROP TABLE fp_fk_subxact, fp_pk_subxact;
+
+-- FK check must see PK rows inserted by earlier AFTER triggers
+-- firing on the same statement
+CREATE TABLE fp_pk_cci (a int PRIMARY KEY);
+CREATE TABLE fp_fk_cci (a int REFERENCES fp_pk_cci);
+
+CREATE FUNCTION fp_auto_pk() RETURNS trigger AS $$
+BEGIN
+  RAISE NOTICE 'fp_auto_pk called';
+  INSERT INTO fp_pk_cci VALUES (NEW.a);
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+-- Name sorts before the RI trigger, so fires first per row
+CREATE TRIGGER "AAA_auto" AFTER INSERT ON fp_fk_cci
+  FOR EACH ROW EXECUTE FUNCTION fp_auto_pk();
+
+-- Should succeed: AAA_auto provisions the PK row before RI check
+INSERT INTO fp_fk_cci VALUES (1), (2), (3);
+
+DROP TABLE fp_fk_cci, fp_pk_cci;
+DROP FUNCTION fp_auto_pk;
