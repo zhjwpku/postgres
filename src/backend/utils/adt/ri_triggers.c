@@ -196,11 +196,21 @@ typedef struct RI_CompareHashEntry
 	FmgrInfo	cast_func_finfo;	/* in case we must coerce input */
 } RI_CompareHashEntry;
 
+/*
+ * Maximum number of FK rows buffered before flushing.
+ *
+ * Larger batches amortize per-flush overhead and let the SK_SEARCHARRAY
+ * path walk more leaf pages in a single sorted traversal.  But each
+ * buffered row is a materialized HeapTuple in TopTransactionContext,
+ * and the matched[] scan in ri_FastPathFlushArray() is O(batch_size)
+ * per index match.  Benchmarking showed little difference between 16
+ * and 64, with 256 consistently slower.  64 is a reasonable default.
+ */
 #define RI_FASTPATH_BATCH_SIZE	64
 
 /*
  * RI_FastPathEntry
- *		Per-constraint cache of resources needed by ri_FastPathFlushBatch().
+ *		Per-constraint cache of resources needed by ri_FastPathBatchFlush().
  *
  * One entry per constraint, keyed by pg_constraint OID.  Created lazily
  * by ri_FastPathGetEntry() on first use within a trigger-firing batch
@@ -218,6 +228,8 @@ typedef struct RI_FastPathEntry
 	TupleTableSlot *pk_slot;
 	TupleTableSlot *fk_slot;
 	Snapshot	snapshot;		/* registered snapshot for the scan */
+	MemoryContext scan_cxt;		/* index scan allocations */
+	MemoryContext flush_cxt;	/* short-lived context for per-flush work */
 
 	HeapTuple	batch[RI_FASTPATH_BATCH_SIZE];
 	int			batch_count;
@@ -430,7 +442,7 @@ RI_FKey_check(TriggerData *trigdata)
 	 * the SPI path below but avoids the per-row executor overhead.
 	 *
 	 * ri_FastPathBatchAdd() and ri_FastPathCheck() report the violation
-	 * themselves if no matching PK row is found, so it only returns on
+	 * themselves if no matching PK row is found, so they only return on
 	 * success.
 	 */
 	if (ri_fastpath_is_applicable(riinfo))
@@ -2849,7 +2861,7 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 	TupleTableSlot *fk_slot = fpentry->fk_slot;
 	Oid			saved_userid;
 	int			saved_sec_context;
-	MemoryContext oldcxt;
+	MemoryContext oldcxt = CurrentMemoryContext;
 
 	if (fpentry->batch_count == 0)
 		return;
@@ -2858,7 +2870,6 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 		ri_populate_fastpath_metadata((RI_ConstraintInfo *) riinfo,
 									  fk_rel, idx_rel);
 	Assert(riinfo->fpmeta);
-
 
 	/*
 	 * CCI and security context switch are done once for the entire batch.
@@ -2880,12 +2891,6 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel)
 						   SECURITY_LOCAL_USERID_CHANGE |
 						   SECURITY_NOFORCE_RLS);
 
-	/*
-	 * The cached scandesc lives in TopTransactionContext, but the index AMs
-	 * might defer some allocations to the first index_getnext_slot call.
-	 * Ensure those land in TopTransactionContext too.
-	 */
-	oldcxt = MemoryContextSwitchTo(TopTransactionContext);
 	if (riinfo->nkeys == 1)
 		ri_FastPathFlushArray(fpentry, fk_slot, riinfo, fk_rel);
 	else
@@ -2925,8 +2930,16 @@ ri_FastPathFlushLoop(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
 
 		ExecStoreHeapTuple(fpentry->batch[i], fk_slot, false);
 
+		/*
+		 * build_index_scankeys() may palloc cast results for cross-type FKs.
+		 * Use the entry's short-lived flush context so these don't accumulate
+		 * across batches.
+		 */
+		MemoryContextSwitchTo(fpentry->flush_cxt);
 		ri_ExtractValues(fk_rel, fk_slot, riinfo, false, pk_vals, pk_nulls);
 		build_index_scankeys(riinfo, idx_rel, pk_vals, pk_nulls, skey);
+		MemoryContextSwitchTo(fpentry->scan_cxt);
+
 		found = ri_FastPathProbeOne(pk_rel, idx_rel, scandesc, pk_slot,
 									snapshot, riinfo, skey, riinfo->nkeys);
 
@@ -2935,6 +2948,7 @@ ri_FastPathFlushLoop(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
 							   fk_slot, NULL,
 							   RI_PLAN_CHECK_LOOKUPPK, false, false);
 	}
+	MemoryContextReset(fpentry->flush_cxt);
 }
 
 /*
@@ -2973,6 +2987,13 @@ ri_FastPathFlushArray(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
 	Assert(fpmeta);
 
 	memset(matched, 0, nvals * sizeof(bool));
+
+	/*
+	 * Transient per-flush allocations (cast results, the search array) must
+	 * not accumulate across repeated flushes.  Use the entry's short-lived
+	 * flush context, reset after each flush.
+	 */
+	MemoryContextSwitchTo(fpentry->flush_cxt);
 
 	/*
 	 * Extract FK values, casting to the operator's expected input
@@ -3021,6 +3042,14 @@ ri_FastPathFlushArray(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
 						   idx_rel->rd_indcollation[0],
 						   fpmeta->regops[0],
 						   PointerGetDatum(arr));
+
+	/*
+	 * Switch to scan_cxt for the index scan: index AMs may defer internal
+	 * allocations (e.g. _bt_preprocess_keys) to the first index_getnext_slot()
+	 * call.  Those must survive across rescans within a batch; scan_cxt is
+	 * deleted in teardown, cleaning them up when the batch ends.
+	 */
+	MemoryContextSwitchTo(fpentry->scan_cxt);
 
 	index_rescan(scandesc, skey, 1, NULL, 0);
 
@@ -3086,8 +3115,9 @@ ri_FastPathFlushArray(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
 		}
 	}
 
-	pfree(arr);
+	MemoryContextReset(fpentry->flush_cxt);
 }
+
 /*
  * ri_FastPathProbeOne
  *		Probe the PK index for one set of scan keys, lock the matching
@@ -3096,9 +3126,10 @@ ri_FastPathFlushArray(RI_FastPathEntry *fpentry, TupleTableSlot *fk_slot,
  * Returns true if a matching PK row was found, locked, and (if
  * applicable) visible to the transaction snapshot.
  *
- * The caller must ensure CurrentMemoryContext is long-lived enough
- * for the scan descriptor's internal allocations (typically
- * TopTransactionContext when using a cached scandesc).
+ * When using a cached scandesc (from the batch path), the caller must switch
+ * to the entry's scan_cxt before calling so that index AM allocations during
+ * index_getnext_slot() survive across rescans.  ri_FastPathCheck uses a
+ * one-shot scan and ends it immediately, so no such switch is needed.
  */
 static bool
 ri_FastPathProbeOne(Relation pk_rel, Relation idx_rel,
@@ -4087,6 +4118,8 @@ ri_FastPathTeardown(void)
 			ExecDropSingleTupleTableSlot(entry->fk_slot);
 		if (entry->snapshot)
 			UnregisterSnapshot(entry->snapshot);
+		if (entry->scan_cxt)
+			MemoryContextDelete(entry->scan_cxt);
 	}
 
 	hash_destroy(ri_fastpath_cache);
@@ -4212,6 +4245,13 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
 		entry->scandesc = index_beginscan(entry->pk_rel, entry->idx_rel,
 										  entry->snapshot, NULL,
 										  riinfo->nkeys, 0);
+
+		entry->scan_cxt = AllocSetContextCreate(TopTransactionContext,
+												"RI fast path scan context",
+												ALLOCSET_DEFAULT_SIZES);
+		entry->flush_cxt = AllocSetContextCreate(entry->scan_cxt,
+												 "RI fast path flush temporary context",
+												 ALLOCSET_SMALL_SIZES);
 
 		MemoryContextSwitchTo(oldcxt);
 
