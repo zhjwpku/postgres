@@ -49,6 +49,17 @@ CREATE TABLE customer_wishlists (
     wishlist_id integer REFERENCES wishlists (wishlist_id)
 );
 
+CREATE TABLE users (
+    user_id integer PRIMARY KEY,
+    name text
+);
+
+CREATE TABLE user_follows (
+    user_follows_id integer PRIMARY KEY,
+    src_user_id integer REFERENCES users (user_id),
+    dst_user_id integer REFERENCES users (user_id)
+);
+
 CREATE PROPERTY GRAPH myshop
     VERTEX TABLES (
         products,
@@ -83,6 +94,17 @@ CREATE PROPERTY GRAPH myshop
             LABEL cust_lists PROPERTIES (customer_id, wishlist_id AS link_id)
     );
 
+CREATE PROPERTY GRAPH social
+    VERTEX TABLES (
+        users LABEL users
+    )
+    EDGE TABLES (
+        user_follows KEY (user_follows_id)
+            SOURCE KEY (src_user_id) REFERENCES users (user_id)
+            DESTINATION KEY (dst_user_id) REFERENCES users (user_id)
+            DEFAULT LABEL
+    );
+
 SELECT customer_name FROM GRAPH_TABLE (xxx MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.name AS customer_name));  -- error
 SELECT customer_name FROM GRAPH_TABLE (pg_class MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (c.name AS customer_name));  -- error
 SELECT customer_name FROM GRAPH_TABLE (myshop MATCH (c IS customers WHERE c.address = 'US')-[IS customer_orders]->(o IS orders) COLUMNS (cx.name AS customer_name));  -- error
@@ -107,6 +129,10 @@ INSERT INTO customers VALUES
     (1, 'customer1', 'US'),
     (2, 'customer2', 'CA'),
     (3, 'customer3', 'GL');
+INSERT INTO users VALUES
+    (1, 'alice'),
+    (2, 'bob'),
+    (3, 'carol');
 INSERT INTO orders VALUES
     (1, date '2024-01-01'),
     (2, date '2024-01-02'),
@@ -131,6 +157,10 @@ INSERT INTO wishlist_items (wishlist_items_id, wishlist_id, product_no) VALUES
     (2, 1, 3),
     (3, 2, 1),
     (4, 3, 1);
+INSERT INTO user_follows (user_follows_id, src_user_id, dst_user_id) VALUES
+    (1, 1, 3),
+    (2, 2, 3),
+    (3, 3, 1);
 
 -- single element path pattern
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers) COLUMNS (c.name));
@@ -149,6 +179,19 @@ SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders | c
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)-[IS customer_orders | customer_wishlists ]->(l IS orders | wishlists)-[ IS list_items]->(p IS products) COLUMNS (c.name AS customer_name, p.name AS product_name, l.list_type)) ORDER BY 1, 2, 3;
 -- vertex to vertex connection abbreviation
 SELECT * FROM GRAPH_TABLE (myshop MATCH (c IS customers)->(o IS orders) COLUMNS (c.name, o.ordered_when)) ORDER BY 1;
+
+-- cross-element comparison in WHERE
+SELECT *
+FROM GRAPH_TABLE (
+    social MATCH (a IS users)-[]->(x IS users)<-[]-(b IS users WHERE b.name != a.name)
+    COLUMNS (a.name AS a_name, x.name AS x_name, b.name AS b_name)
+) ORDER BY 1, 2, 3;
+
+SELECT *
+FROM GRAPH_TABLE (
+    social MATCH (a IS users WHERE b.name != a.name)-[]->(x IS users)<-[]-(b IS users)
+    COLUMNS (a.name AS a_name, x.name AS x_name, b.name AS b_name)
+) ORDER BY 1, 2, 3;
 
 -- lateral test
 CREATE TABLE x1 (a int, b text);

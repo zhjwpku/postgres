@@ -519,7 +519,7 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 		{
 			Node	   *tr;
 
-			tr = replace_property_refs(rte->relid, pf->whereClause, list_make1(pe));
+			tr = replace_property_refs(rte->relid, pf->whereClause, graph_path);
 
 			qual_exprs = lappend(qual_exprs, tr);
 		}

@@ -235,9 +235,6 @@ transformGraphElementPattern(ParseState *pstate, GraphElementPattern *gep)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("element pattern quantifier is not supported")));
 
-	if (gep->variable)
-		gpstate->variables = lappend(gpstate->variables, makeString(pstrdup(gep->variable)));
-
 	gep->labelexpr = transformLabelExpr(gpstate, gep->labelexpr);
 
 	gep->whereClause = transformExpr(pstate, gep->whereClause, EXPR_KIND_WHERE);
@@ -268,6 +265,7 @@ static Node *
 transformPathPatternList(ParseState *pstate, List *path_pattern)
 {
 	List	   *result = NIL;
+	GraphTableParseState *gpstate = pstate->p_graph_table_pstate;
 
 	/* Grammar doesn't allow empty path pattern list */
 	Assert(list_length(path_pattern) > 0);
@@ -280,6 +278,24 @@ transformPathPatternList(ParseState *pstate, List *path_pattern)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("multiple path patterns in one GRAPH_TABLE clause not supported")));
+
+	/*
+	 * SQL/PGQ standard says variable scope is the whole GRAPH_TABLE (SR 18),
+	 * so collect variables across all path patterns/terms before transforming
+	 * any element pattern expressions.
+	 */
+	foreach_node(List, path_term, path_pattern)
+	{
+		foreach_node(GraphElementPattern, gep, path_term)
+		{
+			if (gep->variable)
+			{
+				String *v = makeString(pstrdup(gep->variable));
+				if (!list_member(gpstate->variables, v))
+					gpstate->variables = lappend(gpstate->variables, v);
+			}
+		}
+	}
 
 	foreach_node(List, path_term, path_pattern)
 		result = lappend(result, transformPathTerm(pstate, path_term));
