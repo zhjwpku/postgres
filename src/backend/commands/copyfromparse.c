@@ -1,9 +1,9 @@
 /*-------------------------------------------------------------------------
  *
  * copyfromparse.c
- *		Parse CSV/text/binary format for COPY FROM.
+ *		Parse CSV/text/binary/JSON format for COPY FROM.
  *
- * This file contains routines to parse the text, CSV and binary input
+ * This file contains routines to parse the text, CSV, binary and JSON input
  * formats.  The main entry point is NextCopyFrom(), which parses the
  * next input line and returns it as Datums.
  *
@@ -42,6 +42,14 @@
  * but 'attribute_buf' is used as a temporary buffer to hold one attribute's
  * data when it's passed the receive function.
  *
+ * In JSON mode, steps 1--2 are the same as text mode.  CopyReadNextJson() then
+ * scans line_buf (refilled via CopyLoadInputBuf, then drained into line_buf)
+ * for the next top-level JSON object, like CopyReadLine() gathers one text
+ * line.  The row is parsed in place using row_text_start and row_text_end;
+ * parse_pos remains the scan cursor for subsequent rows.  Consumed data is
+ * discarded only when refilling the buffer.  Selected fields retain their
+ * JSON text until type conversion.
+ *
  * 'raw_buf' is always 64 kB in size (RAW_BUF_SIZE).  'input_buf' is also
  * 64 kB (INPUT_BUF_SIZE), if encoding conversion is required.  'line_buf'
  * and 'attribute_buf' are expanded on demand, to hold the longest line
@@ -62,6 +70,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "catalog/pg_type_d.h"
 #include "commands/copyapi.h"
 #include "commands/copyfrom_internal.h"
 #include "commands/progress.h"
@@ -75,6 +84,7 @@
 #include "port/pg_bswap.h"
 #include "port/simd.h"
 #include "utils/builtins.h"
+#include "utils/jsonfuncs.h"
 #include "utils/rel.h"
 #include "utils/wait_event.h"
 
@@ -160,6 +170,9 @@ static pg_always_inline bool NextCopyFromRawFieldsInternal(CopyFromState cstate,
 														   char ***fields,
 														   int *nfields,
 														   bool is_csv);
+static bool NextCopyFromJsonRawFieldsInternal(CopyFromState cstate,
+											  char ***fields, int *nfields);
+static bool CopyReadNextJson(CopyFromState cstate);
 
 
 /* Low-level communications functions */
@@ -771,6 +784,353 @@ CopyReadBinaryData(CopyFromState cstate, char *dest, int nbytes)
 }
 
 /*
+ * COPY FROM JSON: incremental scanner over line_buf.
+ * Each completed row is identified by offsets in line_buf.  Parsing that
+ * slice in place avoids copying the unparsed suffix after every row.
+ *
+ * We support:
+ *   - A single JSON array of objects:   [ {...}, {...} ]
+ *   - Concatenated objects (auto-detect when input starts with '{'):  {...}{...}
+ *
+ * States:
+ *   BEFORE_ARRAY   — start of input; expect '[' or '{'.
+ *   BEFORE_OBJECT  — after an object in concatenated-object mode; expect '{'.
+ *   IN_ARRAY       — inside [...]; array_parse_state tracks whether to expect
+ *                    an object, a comma, or ']'.
+ *   IN_OBJECT      — brace depth count to find the matching '}' for one row;
+ *                    strings switch to IN_STRING so braces inside strings are ignored.
+ *   IN_STRING / IN_STRING_ESC — minimal string lexer for the above.
+ *   ARRAY_END      — saw closing ']'; no more rows from this document.
+ *
+ * obj_start is the byte offset of an unfinished object in line_buf, including
+ * while scanning a string within that object.  Refilling discards consumed
+ * rows, preserving any unfinished object and adjusting its offset.
+ *
+ * The state machine is implemented in CopyReadNextJson().
+ */
+
+/* JSON permits fewer whitespace characters than isspace(). */
+static inline bool
+CopyJsonIsSpace(unsigned char c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/*
+ * If the scan cursor is past buffered text, compact prefix (when safe) and
+ * read more via CopyLoadInputBuf (then append new input_buf bytes into
+ * line_buf).  When line_buf is still empty afterward,
+ * distinguish clean EOF from truncation errors.
+ *
+ * Returns true if there is more input to scan in line_buf; false if there is
+ * no next JSON row (CopyReadNextJson should report EOF / end of array).
+ */
+static bool
+CopyJsonRefillIfExhausted(CopyFromState cstate, int *obj_start)
+{
+	CopyFromJsonState *json_state = cstate->format_private;
+	StringInfo	line_buf = &cstate->line_buf;
+
+	if (json_state->parse_pos < line_buf->len)
+		return true;
+
+	Assert(json_state->parse_pos == line_buf->len);
+
+	/*
+	 * Discard consumed rows only when we need more input.  If an object is
+	 * incomplete, keep just that object, even when its string spans buffers.
+	 * Keeping earlier rows here would let consecutive large objects grow
+	 * line_buf without bound.
+	 */
+	if (*obj_start < 0)
+	{
+		resetStringInfo(line_buf);
+		json_state->parse_pos = 0;
+	}
+	else if (*obj_start > 0)
+	{
+		line_buf->len -= *obj_start;
+		memmove(line_buf->data, line_buf->data + *obj_start, line_buf->len);
+		line_buf->data[line_buf->len] = '\0';
+		json_state->parse_pos -= *obj_start;
+		*obj_start = 0;
+	}
+
+	/*
+	 * Same refill primitive as text COPY: fill input_buf, then move decoded
+	 * bytes into line_buf.  Always drain the full input_buf chunk (unlike
+	 * CopyReadLine, which may leave a prefix in input_buf).
+	 */
+	{
+		int			nbytes = INPUT_BUF_BYTES(cstate);
+
+		CopyLoadInputBuf(cstate, false);
+
+		if (INPUT_BUF_BYTES(cstate) > nbytes)
+		{
+			appendBinaryStringInfo(line_buf,
+								   cstate->input_buf + cstate->input_buf_index,
+								   INPUT_BUF_BYTES(cstate));
+			cstate->input_buf_index = cstate->input_buf_len;
+			if (cstate->raw_buf == cstate->input_buf)
+				cstate->raw_buf_index = cstate->input_buf_index;
+		}
+	}
+
+	if (json_state->parse_state == COPY_JSON_IN_OBJECT ||
+		json_state->parse_state == COPY_JSON_IN_STRING ||
+		json_state->parse_state == COPY_JSON_IN_STRING_ESC)
+	{
+		if (cstate->input_reached_eof)
+		{
+			cstate->line_buf_valid = false;
+			ereport(ERROR,
+					errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+					errmsg("unexpected end of input in COPY JSON"));
+		}
+		else if (line_buf->len > 0)
+			return true;
+	}
+
+	if (line_buf->len > 0)
+		return true;
+
+	/*
+	 * Still inside [...] (e.g. missing closing "]", or a trailing comma after
+	 * the last element with no "]" following).
+	 */
+	if (json_state->array_mode &&
+		json_state->parse_state == COPY_JSON_IN_ARRAY)
+	{
+		if (cstate->cur_lineno == 0)
+			cstate->cur_lineno = 1;
+		cstate->line_buf_valid = false;
+		ereport(ERROR,
+				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+				 errmsg("invalid input format for COPY JSON"),
+				 errdetail("JSON array input was not closed with \"]\".")));
+	}
+
+	return false;
+}
+
+/*
+ * Read the next JSON row from the input pipeline, analogous to CopyReadLine()
+ * for text format.  On success, [row_text_start, row_text_end) identifies
+ * the row in line_buf, and parse_pos points just after its closing brace.
+ * The next call handles any whitespace or separator following the row.
+ * Does not validate the object's JSON syntax.
+ *
+ * Returns true if there is no next object (EOF / end of array).
+ *
+ * Each iteration consumes one byte (c) from line_buf, then runs the state
+ * machine.
+ */
+static bool
+CopyReadNextJson(CopyFromState cstate)
+{
+	CopyFromJsonState *json_state = cstate->format_private;
+	StringInfo	line_buf = &cstate->line_buf;
+	int			obj_start = -1;
+
+	json_state->row_text_start = -1;
+	json_state->row_text_end = -1;
+
+	for (;;)
+	{
+		/* Long whitespace runs and unfinished rows must be interruptible. */
+		CHECK_FOR_INTERRUPTS();
+
+		if (!CopyJsonRefillIfExhausted(cstate, &obj_start))
+		{
+			cstate->line_buf_valid = false;
+			return true;
+		}
+
+		while (json_state->parse_pos < line_buf->len)
+		{
+			const char *p = line_buf->data + json_state->parse_pos;
+			unsigned char c = (unsigned char) *p++;
+
+			json_state->parse_pos = p - line_buf->data;
+
+			switch (json_state->parse_state)
+			{
+				case COPY_JSON_BEFORE_ARRAY:
+					if (c == '[')
+					{
+						json_state->parse_state = COPY_JSON_IN_ARRAY;
+						json_state->array_parse_state = COPY_JSON_ARRAY_EXPECT_VALUE_OR_END;
+						json_state->array_mode = true;
+						continue;
+					}
+					if (c == '{')
+					{
+						/* Auto-detect concatenated objects {...}{...}. */
+						cstate->cur_lineno++;
+						json_state->parse_state = COPY_JSON_IN_OBJECT;
+						json_state->object_depth = 1;
+						obj_start = (p - 1) - line_buf->data;
+						continue;
+					}
+					if (CopyJsonIsSpace(c))
+						continue;
+					if (cstate->cur_lineno == 0)
+						cstate->cur_lineno = 1;
+					cstate->line_buf_valid = false;
+					ereport(ERROR,
+							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+							 errmsg("invalid input format for COPY JSON"),
+							 errdetail("Document must begin with \"[\" or \"{\".")));
+					pg_unreachable();
+
+				case COPY_JSON_BEFORE_OBJECT:
+					if (c == '{')
+					{
+						cstate->cur_lineno++;
+						json_state->parse_state = COPY_JSON_IN_OBJECT;
+						json_state->object_depth = 1;
+						obj_start = (p - 1) - line_buf->data;
+						continue;
+					}
+					if (CopyJsonIsSpace(c))
+						continue;
+					cstate->line_buf_valid = false;
+					if (c == ',')
+						ereport(ERROR,
+								errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+								errmsg("COPY JSON, line %" PRIu64 ": invalid input format",
+									   cstate->cur_lineno),
+								errdetail("Cannot use a comma between concatenated JSON objects; use a JSON array."));
+					ereport(ERROR,
+							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+							 errmsg("COPY JSON, line %" PRIu64 ": invalid input format",
+									cstate->cur_lineno),
+							 errdetail("Expected \"{\" to start the next row object.")));
+					pg_unreachable();
+
+				case COPY_JSON_IN_ARRAY:
+					if (CopyJsonIsSpace(c))
+						continue;
+
+					if (json_state->array_parse_state == COPY_JSON_ARRAY_EXPECT_COMMA_OR_END)
+					{
+						if (c == ',')
+						{
+							json_state->array_parse_state = COPY_JSON_ARRAY_EXPECT_VALUE;
+							continue;
+						}
+						if (c == ']')
+						{
+							json_state->parse_state = COPY_JSON_ARRAY_END;
+							continue;
+						}
+						if (c == '{')
+						{
+							cstate->line_buf_valid = false;
+							ereport(ERROR,
+									errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+									errmsg("COPY JSON, line %" PRIu64 ": invalid input format",
+										   cstate->cur_lineno),
+									errdetail("Expected \",\" between array elements."));
+							pg_unreachable();
+						}
+					}
+					else
+					{
+						if (c == '{')
+						{
+							cstate->cur_lineno++;
+							json_state->parse_state = COPY_JSON_IN_OBJECT;
+							json_state->object_depth = 1;
+							obj_start = (p - 1) - line_buf->data;
+							continue;
+						}
+						if (c == ']' &&
+							json_state->array_parse_state == COPY_JSON_ARRAY_EXPECT_VALUE_OR_END)
+						{
+							json_state->parse_state = COPY_JSON_ARRAY_END;
+							continue;
+						}
+					}
+					if (cstate->cur_lineno == 0)
+						cstate->cur_lineno = 1;
+					cstate->line_buf_valid = false;
+					ereport(ERROR,
+							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+							 errmsg("COPY JSON, line %" PRIu64 ": each array element must be a JSON object",
+									cstate->cur_lineno)));
+					pg_unreachable();
+
+				case COPY_JSON_IN_OBJECT:
+					switch (c)
+					{
+						case '{':
+							json_state->object_depth++;
+							break;
+						case '}':
+							json_state->object_depth--;
+							if (json_state->object_depth == 0)
+							{
+								json_state->row_text_start = obj_start;
+								json_state->row_text_end = json_state->parse_pos;
+
+								json_state->parse_state = (json_state->array_mode)
+									? COPY_JSON_IN_ARRAY : COPY_JSON_BEFORE_OBJECT;
+								if (json_state->array_mode)
+									json_state->array_parse_state = COPY_JSON_ARRAY_EXPECT_COMMA_OR_END;
+
+								return false;
+							}
+							break;
+						case '[':
+							json_state->object_depth++;
+							break;
+						case ']':
+							json_state->object_depth--;
+							break;
+						case '"':
+							json_state->parse_state = COPY_JSON_IN_STRING;
+							break;
+						case '\\':
+							cstate->line_buf_valid = false;
+							ereport(ERROR,
+									errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+									errmsg("invalid input syntax for type json"));
+							break;
+						default:
+							break;
+					}
+					break;
+
+				case COPY_JSON_IN_STRING:
+					if (c == '\\')
+						json_state->parse_state = COPY_JSON_IN_STRING_ESC;
+					else if (c == '"')
+						json_state->parse_state = COPY_JSON_IN_OBJECT;
+					break;
+
+				case COPY_JSON_IN_STRING_ESC:
+					json_state->parse_state = COPY_JSON_IN_STRING;
+					break;
+
+				case COPY_JSON_ARRAY_END:
+					if (CopyJsonIsSpace(c))
+						continue;
+					if (cstate->cur_lineno == 0)
+						cstate->cur_lineno = 1;
+					cstate->line_buf_valid = false;
+					ereport(ERROR,
+							errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+							errmsg("invalid input format for COPY JSON"),
+							errdetail("Trailing data after JSON array."));
+					pg_unreachable();
+			}
+		}
+	}
+}
+
+/*
  * This function is exposed for use by extensions that read raw fields in the
  * next line. See NextCopyFromRawFieldsInternal() for details.
  */
@@ -811,7 +1171,6 @@ NextCopyFromRawFieldsInternal(CopyFromState cstate, char ***fields, int *nfields
 	/* on input check that the header line is correct if needed */
 	if (cstate->cur_lineno == 0 && cstate->opts.header_line != COPY_HEADER_FALSE)
 	{
-		ListCell   *cur;
 		TupleDesc	tupDesc;
 		int			lines_to_skip = cstate->opts.header_line;
 
@@ -844,9 +1203,8 @@ NextCopyFromRawFieldsInternal(CopyFromState cstate, char ***fields, int *nfields
 								fldct, list_length(cstate->attnumlist))));
 
 			fldnum = 0;
-			foreach(cur, cstate->attnumlist)
+			foreach_int(attnum, cstate->attnumlist)
 			{
-				int			attnum = lfirst_int(cur);
 				char	   *colName;
 				Form_pg_attribute attr = TupleDescAttr(tupDesc, attnum - 1);
 
@@ -984,7 +1342,6 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 	Oid		   *typioparams = cstate->typioparams;
 	ExprState **defexprs = cstate->defexprs;
 	char	  **field_strings;
-	ListCell   *cur;
 	int			fldct;
 	int			fieldno;
 	char	   *string;
@@ -1006,9 +1363,8 @@ CopyFromTextLikeOneRow(CopyFromState cstate, ExprContext *econtext,
 	fieldno = 0;
 
 	/* Loop to read the user attributes on the line. */
-	foreach(cur, cstate->attnumlist)
+	foreach_int(attnum, cstate->attnumlist)
 	{
-		int			attnum = lfirst_int(cur);
 		int			m = attnum - 1;
 		Form_pg_attribute att = TupleDescAttr(tupDesc, m);
 
@@ -1194,7 +1550,6 @@ CopyFromBinaryOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values,
 	FmgrInfo   *in_functions = cstate->in_functions;
 	Oid		   *typioparams = cstate->typioparams;
 	int16		fld_count;
-	ListCell   *cur;
 
 	tupDesc = RelationGetDescr(cstate->rel);
 	attr_count = list_length(cstate->attnumlist);
@@ -1232,9 +1587,8 @@ CopyFromBinaryOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values,
 				 errmsg("row field count is %d, expected %d",
 						fld_count, attr_count)));
 
-	foreach(cur, cstate->attnumlist)
+	foreach_int(attnum, cstate->attnumlist)
 	{
-		int			attnum = lfirst_int(cur);
 		int			m = attnum - 1;
 		Form_pg_attribute att = TupleDescAttr(tupDesc, m);
 
@@ -1246,6 +1600,315 @@ CopyFromBinaryOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values,
 											&nulls[m]);
 		cstate->cur_attname = NULL;
 	}
+
+	return true;
+}
+
+/* State for extracting the top-level fields of a JSON row object. */
+typedef struct CopyFromJsonParseState
+{
+	CopyFromState cstate;
+	JsonLexContext *lex;
+	const char *next_field;
+	const char *value_start;
+	int			fieldno;
+} CopyFromJsonParseState;
+
+/*
+ * Decode only top-level field names.  The main lexer deliberately leaves
+ * string values escaped so that json columns can retain their original text,
+ * including Unicode escapes that cannot be represented in a SQL text value.
+ */
+static JsonParseErrorType
+CopyJsonFieldStart(void *state, char *fname, bool isnull)
+{
+	CopyFromJsonParseState *st = state;
+	CopyFromJsonState *json_state = st->cstate->format_private;
+	JsonLexContext keylex;
+	JsonParseErrorType result;
+	CopyJsonAttribute *entry = NULL;
+
+	if (st->lex->lex_level != 1)
+		return JSON_SUCCESS;
+
+	makeJsonLexContextCstringLen(&keylex, st->next_field,
+								 st->lex->token_start - st->next_field,
+								 GetDatabaseEncoding(), true);
+	result = json_lex(&keylex);
+	if (result != JSON_SUCCESS)
+		json_errsave_error(result, &keylex, NULL);
+	Assert(keylex.token_type == JSON_TOKEN_STRING);
+
+	/* Longer names cannot match a column; do not let the hash truncate them. */
+	if (keylex.strval->len < NAMEDATALEN)
+		entry = hash_search(json_state->attribute_map, keylex.strval->data,
+							HASH_FIND, NULL);
+	st->fieldno = entry ? entry->fieldno : -1;
+	st->value_start = st->lex->token_start;
+	freeJsonLexContext(&keylex);
+
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+CopyJsonFieldEnd(void *state, char *fname, bool isnull)
+{
+	CopyFromJsonParseState *st = state;
+
+	if (st->lex->lex_level != 1)
+		return JSON_SUCCESS;
+
+	if (st->fieldno >= 0)
+	{
+		char	  **field = &st->cstate->raw_fields[st->fieldno];
+
+		/* As with json_populate_record, the last occurrence of a key wins. */
+		if (*field != NULL)
+			pfree(*field);
+		*field = isnull ? NULL :
+			pnstrdup(st->value_start,
+					 st->lex->prev_token_terminator - st->value_start);
+	}
+
+	/* The current token is the comma (or closing brace) after the value. */
+	st->next_field = st->lex->token_terminator;
+	return JSON_SUCCESS;
+}
+
+/*
+ * Read and validate one JSON row, keeping the raw JSON text of each selected
+ * field.  Missing keys and JSON null become SQL NULL.  Field strings live in
+ * the caller's per-tuple context, so growing one cannot invalidate another.
+ */
+static bool
+NextCopyFromJsonRawFieldsInternal(CopyFromState cstate, char ***fields, int *nfields)
+{
+	CopyFromJsonState *json_state = cstate->format_private;
+	CopyFromJsonParseState state;
+	JsonLexContext lex;
+	JsonSemAction sem = {0};
+	const char *row;
+	int			rowlen;
+
+	Assert(cstate->opts.format == COPY_FORMAT_JSON);
+
+	/* A previous row may have ended with a soft conversion error. */
+	cstate->cur_attname = NULL;
+	cstate->cur_attval = NULL;
+	if (CopyReadNextJson(cstate))
+		return false;
+
+	/* line_buf also contains read-ahead data, which is not error context. */
+	cstate->line_buf_valid = false;
+	MemSet(cstate->raw_fields, 0, cstate->max_fields * sizeof(char *));
+
+	Assert(json_state->row_text_start >= 0);
+	Assert(json_state->row_text_end > json_state->row_text_start);
+	Assert(json_state->row_text_end == json_state->parse_pos);
+	Assert(json_state->row_text_end <= cstate->line_buf.len);
+	row = cstate->line_buf.data + json_state->row_text_start;
+	rowlen = json_state->row_text_end - json_state->row_text_start;
+	makeJsonLexContextCstringLen(&lex, row, rowlen, GetDatabaseEncoding(), false);
+	state.cstate = cstate;
+	state.lex = &lex;
+
+	Assert(row[0] == '{');
+	state.next_field = row + 1;
+	state.value_start = NULL;
+	state.fieldno = -1;
+	sem.semstate = &state;
+	sem.object_field_start = CopyJsonFieldStart;
+	sem.object_field_end = CopyJsonFieldEnd;
+	pg_parse_json_or_ereport(&lex, &sem);
+	freeJsonLexContext(&lex);
+
+	*fields = cstate->raw_fields;
+	*nfields = cstate->max_fields;
+	return true;
+}
+
+/* Convert a field without discarding its original JSON representation. */
+static bool
+CopyConvertJsonAttribute(CopyFromState cstate, Form_pg_attribute att, int m,
+						 const char *string, Datum *value, bool *isnull)
+{
+	CopyFromJsonState *json_state = cstate->format_private;
+	Node	   *escontext = (Node *) cstate->escontext;
+	Oid			base_type = json_state->base_types[m];
+	JsonLexContext lex;
+	bool		result;
+
+	/* json/jsonb input functions, including domain inputs, need JSON text. */
+	if (string == NULL || base_type == JSONOID || base_type == JSONBOID)
+		return InputFunctionCallSafe(&cstate->in_functions[m], string,
+									 cstate->typioparams[m], att->atttypmod,
+									 escontext, value);
+
+	if (string[0] == '[' || string[0] == '{')
+	{
+		/*
+		 * Reuse recursive conversion for arrays, composites and their
+		 * domains.
+		 */
+		*value = json_populate_type(CStringGetTextDatum(string), JSONOID,
+									att->atttypid, att->atttypmod,
+									&json_state->conversion_cache[m],
+									cstate->copycontext, isnull, false, escontext);
+		return !SOFT_ERROR_OCCURRED(escontext);
+	}
+
+	if (string[0] != '"')
+		return InputFunctionCallSafe(&cstate->in_functions[m], string,
+									 cstate->typioparams[m], att->atttypmod,
+									 escontext, value);
+
+	/* Other input functions receive the unquoted, unescaped JSON string. */
+	makeJsonLexContextCstringLen(&lex, string, strlen(string),
+								 GetDatabaseEncoding(), true);
+	result = pg_parse_json_or_errsave(&lex, &nullSemAction, escontext);
+	if (result)
+		result = InputFunctionCallSafe(&cstate->in_functions[m], lex.strval->data,
+									   cstate->typioparams[m], att->atttypmod,
+									   escontext, value);
+	freeJsonLexContext(&lex);
+	return result;
+}
+
+/* Implementation of the per-row callback for JSON format */
+bool
+CopyFromJsonOneRow(CopyFromState cstate, ExprContext *econtext, Datum *values,
+				   bool *nulls)
+{
+	TupleDesc	tupDesc;
+	FmgrInfo   *in_functions = cstate->in_functions;
+	Oid		   *typioparams = cstate->typioparams;
+	ExprState **defexprs = cstate->defexprs;
+	char	  **field_strings;
+	int			fldct;
+	int			fieldno;
+	char	   *string;
+	bool		current_row_erroneous = false;
+
+	/* read raw fields from the next JSON object (by column name) */
+	if (!NextCopyFromJsonRawFieldsInternal(cstate, &field_strings, &fldct))
+		return false;
+
+	tupDesc = RelationGetDescr(cstate->rel);
+
+	fieldno = 0;
+
+	/* Loop to convert field strings to Datums for each column */
+	foreach_int(attnum, cstate->attnumlist)
+	{
+		int			m = attnum - 1;
+		Form_pg_attribute att = TupleDescAttr(tupDesc, m);
+
+		Assert(fieldno < fldct);
+		string = field_strings[fieldno++];
+
+		if (cstate->convert_select_flags &&
+			!cstate->convert_select_flags[m])
+		{
+			/* ignore input field, leaving column as NULL */
+			continue;
+		}
+
+		cstate->cur_attname = NameStr(att->attname);
+		cstate->cur_attval = string;
+
+		if (string != NULL)
+			nulls[m] = false;
+
+		if (cstate->defaults[m])
+		{
+			Assert(econtext != NULL);
+			Assert(CurrentMemoryContext == econtext->ecxt_per_tuple_memory);
+
+			values[m] = ExecEvalExpr(defexprs[m], econtext, &nulls[m]);
+		}
+		else if (!CopyConvertJsonAttribute(cstate, att, m, string,
+										   &values[m], &nulls[m]))
+		{
+			Assert(cstate->opts.on_error != COPY_ON_ERROR_STOP);
+
+			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+				cstate->num_errors++;
+			else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
+			{
+				cstate->escontext->error_occurred = false;
+
+				Assert(cstate->domain_with_constraint != NULL);
+
+				if (!cstate->domain_with_constraint[m] ||
+					InputFunctionCallSafe(&in_functions[m],
+										  NULL,
+										  typioparams[m],
+										  att->atttypmod,
+										  (Node *) cstate->escontext,
+										  &values[m]))
+				{
+					nulls[m] = true;
+					values[m] = (Datum) 0;
+				}
+				else
+					ereport(ERROR,
+							errcode(ERRCODE_NOT_NULL_VIOLATION),
+							errmsg("domain %s does not allow null values",
+								   format_type_be(typioparams[m])),
+							errdetail("ON_ERROR SET_NULL cannot be applied because column \"%s\" (domain %s) does not accept null values.",
+									  cstate->cur_attname,
+									  format_type_be(typioparams[m])),
+							errdatatype(typioparams[m]));
+
+				if (!current_row_erroneous)
+				{
+					current_row_erroneous = true;
+					cstate->num_errors++;
+				}
+			}
+
+			if (cstate->opts.log_verbosity == COPY_LOG_VERBOSITY_VERBOSE)
+			{
+				Assert(!cstate->relname_only);
+				cstate->relname_only = true;
+
+				if (cstate->cur_attval)
+				{
+					char	   *attval = CopyLimitPrintoutLength(cstate->cur_attval);
+
+					if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+						ereport(NOTICE,
+								errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": \"%s\"",
+									   cstate->cur_lineno,
+									   cstate->cur_attname,
+									   attval));
+					else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
+						ereport(NOTICE,
+								errmsg("setting to null due to data type incompatibility at line %" PRIu64 " for column \"%s\": \"%s\"",
+									   cstate->cur_lineno,
+									   cstate->cur_attname,
+									   attval));
+					pfree(attval);
+				}
+				else if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+					ereport(NOTICE,
+							errmsg("skipping row due to data type incompatibility at line %" PRIu64 " for column \"%s\": null input",
+								   cstate->cur_lineno,
+								   cstate->cur_attname));
+				cstate->relname_only = false;
+			}
+
+			if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE)
+				return true;
+			else if (cstate->opts.on_error == COPY_ON_ERROR_SET_NULL)
+				continue;
+		}
+
+		cstate->cur_attname = NULL;
+		cstate->cur_attval = NULL;
+	}
+
+	Assert(fieldno == fldct);
 
 	return true;
 }

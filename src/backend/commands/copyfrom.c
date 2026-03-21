@@ -153,6 +153,19 @@ static const CopyFromRoutine CopyFromRoutineBinary = {
 	.CopyFromEnd = CopyFromBinaryEnd,
 };
 
+/* JSON format */
+static void CopyFromJsonInFunc(CopyFromState cstate, Oid atttypid, FmgrInfo *finfo,
+							   Oid *typioparam);
+static void CopyFromJsonStart(CopyFromState cstate, TupleDesc tupDesc);
+static void CopyFromJsonEnd(CopyFromState cstate);
+
+static const CopyFromRoutine CopyFromRoutineJson = {
+	.CopyFromInFunc = CopyFromJsonInFunc,
+	.CopyFromStart = CopyFromJsonStart,
+	.CopyFromOneRow = CopyFromJsonOneRow,
+	.CopyFromEnd = CopyFromJsonEnd,
+};
+
 /* Return a COPY FROM routine for the given options */
 static const CopyFromRoutine *
 CopyFromGetRoutine(const CopyFormatOptions *opts)
@@ -161,6 +174,8 @@ CopyFromGetRoutine(const CopyFormatOptions *opts)
 		return &CopyFromRoutineCSV;
 	else if (opts->format == COPY_FORMAT_BINARY)
 		return &CopyFromRoutineBinary;
+	else if (opts->format == COPY_FORMAT_JSON)
+		return &CopyFromRoutineJson;
 
 	/* default is text */
 	return &CopyFromRoutineText;
@@ -245,6 +260,81 @@ static void
 CopyFromBinaryEnd(CopyFromState cstate)
 {
 	/* nothing to do */
+}
+
+/* Implementation of the infunc callback for JSON format */
+static void
+CopyFromJsonInFunc(CopyFromState cstate, Oid atttypid, FmgrInfo *finfo,
+				   Oid *typioparam)
+{
+	Oid			func_oid;
+
+	getTypeInputInfo(atttypid, &func_oid, typioparam);
+	fmgr_info(func_oid, finfo);
+}
+
+/* Implementation of the start callback for JSON format */
+static void
+CopyFromJsonStart(CopyFromState cstate, TupleDesc tupDesc)
+{
+	CopyFromJsonState *json_state;
+	HASHCTL		ctl = {0};
+	int			fieldno = 0;
+
+	/*
+	 * Set up input_buf for encoding conversion, same as text format.
+	 */
+	if (cstate->need_transcoding)
+	{
+		cstate->input_buf = (char *) palloc(INPUT_BUF_SIZE + 1);
+		cstate->input_buf_index = cstate->input_buf_len = 0;
+	}
+	else
+		cstate->input_buf = cstate->raw_buf;
+	cstate->input_reached_eof = false;
+
+	initStringInfo(&cstate->line_buf);
+
+	/* Store state for CopyFromJsonOneRow (JSON scan uses line_buf) */
+	json_state = palloc0_object(CopyFromJsonState);
+	/* Accept [...] or auto-detect concatenated objects {...}{...} */
+	json_state->parse_state = COPY_JSON_BEFORE_ARRAY;
+	json_state->row_text_start = -1;
+	json_state->row_text_end = -1;
+	json_state->base_types = palloc0_array(Oid, tupDesc->natts);
+	json_state->conversion_cache = palloc0_array(void *, tupDesc->natts);
+	cstate->format_private = json_state;
+
+	ctl.keysize = NAMEDATALEN;
+	ctl.entrysize = sizeof(CopyJsonAttribute);
+	ctl.hcxt = cstate->copycontext;
+	json_state->attribute_map = hash_create("COPY JSON attributes",
+											Max(1, list_length(cstate->attnumlist)),
+											&ctl, HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	foreach_int(attnum, cstate->attnumlist)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupDesc, attnum - 1);
+		CopyJsonAttribute *entry;
+
+		entry = hash_search(json_state->attribute_map, NameStr(att->attname),
+							HASH_ENTER, NULL);
+		entry->fieldno = fieldno++;
+		json_state->base_types[attnum - 1] = getBaseType(att->atttypid);
+	}
+
+	/*
+	 * Raw JSON field strings are allocated in the per-tuple context.  Only
+	 * the array of pointers needs to survive between rows.
+	 */
+	cstate->max_fields = list_length(cstate->attnumlist);
+	cstate->raw_fields = palloc_array(char *, cstate->max_fields);
+}
+
+/* Implementation of the end callback for JSON format */
+static void
+CopyFromJsonEnd(CopyFromState cstate)
+{
+	/* format_private (CopyFromJsonState) is freed with copycontext */
 }
 
 /*

@@ -144,9 +144,313 @@ LINE 1: copy copytest to stdout (format json, on_error ignore);
                                               ^
 copy copytest to stdout (format json, reject_limit 1);
 ERROR:  COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE
-copy copytest from stdin(format json);
-ERROR:  COPY FORMAT JSON is not supported for COPY FROM
 -- all of the above should yield error
+-- COPY FROM JSON: each array element is a row, object keys match column names
+create temp table copytest_from_json (like copytest);
+copy copytest_from_json (style, test) from stdin (format json);
+select * from copytest_from_json order by style collate "C";
+  style  |   test   | filler 
+---------+----------+--------
+ DOS     | abc\r   +|       
+         | def      | 
+ Mac     | abc\rdef |       
+ Unix    | abc     +|       
+         | def      | 
+ esc\ape | a\r\\r\ +|       
+         | \nb      | 
+(4 rows)
+
+-- Round trip: COPY TO JSON file, then COPY FROM JSON file
+\set copy_json_rt :abs_builddir '/results/copytest_roundtrip.json'
+truncate copytest2;
+copy copytest to :'copy_json_rt' (format json);
+copy copytest2 from :'copy_json_rt' (format json);
+select * from copytest except select * from copytest2;
+ style | test | filler 
+-------+------+--------
+(0 rows)
+
+truncate copytest2;
+copy copytest to :'copy_json_rt' (format json, force_array true);
+copy copytest2 from :'copy_json_rt' (format json);
+select * from copytest except select * from copytest2;
+ style | test | filler 
+-------+------+--------
+(0 rows)
+
+-- COPY FROM JSON edge cases: invalid input, non-array, missing required field
+copy copytest_from_json from stdin (format json);
+ERROR:  invalid input format for COPY JSON
+DETAIL:  Document must begin with "[" or "{".
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  invalid input syntax for type json
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  COPY JSON, line 1: each array element must be a JSON object
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  COPY JSON, line 1: each array element must be a JSON object
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  COPY JSON, line 1: invalid input format
+DETAIL:  Expected "," between array elements.
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  COPY JSON, line 1: invalid input format
+DETAIL:  Cannot use a comma between concatenated JSON objects; use a JSON array.
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  invalid input format for COPY JSON
+DETAIL:  JSON array input was not closed with "]".
+CONTEXT:  COPY copytest_from_json, line 2
+copy copytest_from_json from stdin (format json);
+ERROR:  invalid input format for COPY JSON
+DETAIL:  JSON array input was not closed with "]".
+CONTEXT:  COPY copytest_from_json, line 2
+copy copytest_from_json from stdin (format json);
+ERROR:  unexpected end of input in COPY JSON
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  unexpected end of input in COPY JSON
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  COPY JSON, line 1: each array element must be a JSON object
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  invalid input format for COPY JSON
+DETAIL:  Trailing data after JSON array.
+CONTEXT:  COPY copytest_from_json, line 1
+copy copytest_from_json from stdin (format json);
+ERROR:  invalid input format for COPY JSON
+DETAIL:  Trailing data after JSON array.
+CONTEXT:  COPY copytest_from_json, line 1
+create temp table copyjson_req (style text NOT NULL, test text);
+copy copyjson_req from stdin (format json);
+ERROR:  null value in column "style" of relation "copyjson_req" violates not-null constraint
+DETAIL:  Failing row contains (null, only test).
+CONTEXT:  COPY copyjson_req, line 1
+copy copyjson_req from stdin (format json);
+select * from copyjson_req;
+ style | test 
+-------+------
+ ok    | both
+(1 row)
+
+truncate copytest_from_json;
+copy copytest_from_json (style, test) from stdin (format json);
+select style, test, filler from copytest_from_json;
+ style | test | filler 
+-------+------+--------
+ a     | b    |       
+(1 row)
+
+\set copy_json_boundary :abs_builddir '/results/copytest_json_boundary.json'
+copy (select '[{"style":"' || repeat('x', 65512) || '","test":"a"},{"style":"b","test":"c"}]') to :'copy_json_boundary';
+truncate copytest_from_json;
+copy copytest_from_json (style, test) from :'copy_json_boundary' (format json);
+select length(style), test from copytest_from_json order by length(style);
+ length | test 
+--------+------
+      1 | c
+  65512 | a
+(2 rows)
+
+create temp table copyjsontest_scalars (js json, jsb jsonb);
+copy copyjsontest_scalars from stdin (format json);
+select js, jsb from copyjsontest_scalars;
+  js   |  jsb  
+-------+-------
+ "foo" | true
+ false | "bar"
+(2 rows)
+
+-- Field storage must survive large values and exact buffer-size boundaries.
+create temp table copyjson_wide (a text, b text);
+copy (select 'first' as a, repeat('x', 5000) as b) to :'copy_json_rt' (format json);
+copy copyjson_wide from :'copy_json_rt' (format json);
+select a = 'first', length(a), b = repeat('x', 5000) from copyjson_wide;
+ ?column? | length | ?column? 
+----------+--------+----------
+ t        |      5 | t
+(1 row)
+
+truncate copyjson_wide;
+copy (select repeat('x', 1023) as a) to :'copy_json_rt' (format json);
+copy copyjson_wide (a) from :'copy_json_rt' (format json);
+select a = repeat('x', 1023), length(a), b is null from copyjson_wide;
+ ?column? | length | ?column? 
+----------+--------+----------
+ t        |   1023 | t
+(1 row)
+
+-- Domains need the same JSON representation as their base types.
+create domain pg_temp.copyjson_json as json;
+create domain pg_temp.copyjson_jsonb as jsonb;
+create domain pg_temp.copyjson_string as json check (json_typeof(value) = 'string');
+create type pg_temp.copyjson_boolean_word as enum ('true', 'false');
+create temp table copyjson_domains
+    (j pg_temp.copyjson_json, jb pg_temp.copyjson_jsonb,
+     s pg_temp.copyjson_string, t text, e pg_temp.copyjson_boolean_word);
+copy copyjson_domains from stdin (format json);
+select j, json_typeof(j), jb, jsonb_typeof(jb), s, t, e from copyjson_domains;
+   j    | json_typeof |  jb   | jsonb_typeof |   s    |   t   |   e   
+--------+-------------+-------+--------------+--------+-------+-------
+ "true" | string      | "123" | string       | "null" | true  | false
+ true   | boolean     | false | boolean      | "foo"  | false | true
+(2 rows)
+
+copy copyjson_domains (s) from stdin (format json);
+ERROR:  value for domain copyjson_string violates check constraint "copyjson_string_check"
+CONTEXT:  COPY copyjson_domains, line 1, column s: "true"
+-- Preserve json text, including duplicate keys and values jsonb rejects.
+create temp table copyjson_preserve (id int, j json);
+insert into copyjson_preserve values
+    (1, '{"k":1, "k":2}'), (2, '"\u0000"'), (3, '1e1000000'),
+    (4, '{"nested":["\u0000",{"k":1,"k":2}]}'), (5, '"\u0061"');
+copy copyjson_preserve to :'copy_json_rt' (format json);
+truncate copyjson_preserve;
+copy copyjson_preserve from :'copy_json_rt' (format json);
+select * from copyjson_preserve order by id;
+ id |                  j                  
+----+-------------------------------------
+  1 | {"k":1, "k":2}
+  2 | "\u0000"
+  3 | 1e1000000
+  4 | {"nested":["\u0000",{"k":1,"k":2}]}
+  5 | "\u0061"
+(5 rows)
+
+-- Recurse into SQL arrays/composites and enforce domain constraints.
+create type pg_temp.copyjson_pair as (i int, s text);
+create domain pg_temp.copyjson_intarray as int[] check (cardinality(value) <= 2);
+create domain pg_temp.copyjson_pair_domain as pg_temp.copyjson_pair
+    check ((value).i > 0);
+create temp table copyjson_structured
+    (a int[], t text[], p pg_temp.copyjson_pair,
+     da pg_temp.copyjson_intarray, dp pg_temp.copyjson_pair_domain);
+copy copyjson_structured from stdin (format json);
+select * from copyjson_structured;
+       a       |     t      |       p        |  da   |   dp    
+---------------+------------+----------------+-------+---------
+ {{1,2},{3,4}} | {a,NULL,b} | (1,one)        | {1,2} | (2,two)
+ {}            | {}         | (,"missing i") | {}    | (3,)
+(2 rows)
+
+copy copyjson_structured to :'copy_json_rt' (format json, force_array);
+truncate copyjson_structured;
+copy copyjson_structured from :'copy_json_rt' (format json);
+select * from copyjson_structured;
+       a       |     t      |       p        |  da   |   dp    
+---------------+------------+----------------+-------+---------
+ {{1,2},{3,4}} | {a,NULL,b} | (1,one)        | {1,2} | (2,two)
+ {}            | {}         | (,"missing i") | {}    | (3,)
+(2 rows)
+
+-- JSON strings can also contain PostgreSQL array and record literals.
+copy copyjson_structured (a, p) from stdin (format json);
+select a, p from copyjson_structured where a = array[5,6];
+   a   |     p     
+-------+-----------
+ {5,6} | (7,seven)
+(1 row)
+
+copy copyjson_structured (da) from stdin (format json);
+ERROR:  value for domain copyjson_intarray violates check constraint "copyjson_intarray_check"
+CONTEXT:  COPY copyjson_structured, line 1, column da: "[1,2,3]"
+copy copyjson_structured (dp) from stdin (format json);
+ERROR:  value for domain copyjson_pair_domain violates check constraint "copyjson_pair_domain_check"
+CONTEXT:  COPY copyjson_structured, line 1, column dp: "{"i":0,"s":"invalid"}"
+-- Soft conversion errors still work for strings and nested values.
+truncate copyjson_structured;
+copy copyjson_structured (a, p) from stdin (format json, on_error ignore);
+NOTICE:  2 rows were skipped due to data type incompatibility
+copy copyjson_structured (a, p) from stdin (format json, on_error set_null);
+NOTICE:  in 1 row, columns were set to null due to data type incompatibility
+select a, p from copyjson_structured;
+   a   |      p      
+-------+-------------
+ {8,9} | (10,ten)
+       | (11,eleven)
+(2 rows)
+
+create domain pg_temp.copyjson_required_array as int[] not null;
+create temp table copyjson_required (a pg_temp.copyjson_required_array);
+copy copyjson_required from stdin (format json, on_error set_null);
+ERROR:  domain copyjson_required_array does not allow null values
+DETAIL:  ON_ERROR SET_NULL cannot be applied because column "a" (domain copyjson_required_array) does not accept null values.
+CONTEXT:  COPY copyjson_required, line 1, column a: "["bad"]"
+copy copyjson_required from stdin (format json);
+ERROR:  domain copyjson_required_array does not allow null values
+CONTEXT:  COPY copyjson_required, line 1, column a: null input
+create temp table copyjson_soft_strings (t text, j jsonb);
+copy copyjson_soft_strings from stdin (format json, on_error ignore);
+NOTICE:  2 rows were skipped due to data type incompatibility
+select * from copyjson_soft_strings;
+ t |  j   
+---+------
+ a | true
+(1 row)
+
+copy copyjson_soft_strings from stdin (format json, on_error set_null);
+NOTICE:  in 1 row, columns were set to null due to data type incompatibility
+select t is null, j is null from copyjson_soft_strings;
+ ?column? | ?column? 
+----------+----------
+ f        | f
+ t        | t
+(2 rows)
+
+-- Match escaped names, take the last duplicate, and ignore unselected values.
+create temp table copyjson_names (ab int, other text default 'default');
+copy copyjson_names (ab) from stdin (format json);
+select * from copyjson_names;
+ ab |  other  
+----+---------
+  2 | default
+    | default
+(2 rows)
+
+-- Only space, horizontal tab, CR and LF are JSON whitespace.
+-- Use psql output to write the control characters without COPY escaping them.
+select E'\v[{"ab":1}]' as bad_json \gset
+\o :copy_json_rt
+\qecho :bad_json
+\o
+copy copyjson_names from :'copy_json_rt' (format json);
+ERROR:  invalid input format for COPY JSON
+DETAIL:  Document must begin with "[" or "{".
+CONTEXT:  COPY copyjson_names, line 1
+select E'[\v{"ab":1}]' as bad_json \gset
+\o :copy_json_rt
+\qecho :bad_json
+\o
+copy copyjson_names from :'copy_json_rt' (format json);
+ERROR:  COPY JSON, line 1: each array element must be a JSON object
+CONTEXT:  COPY copyjson_names, line 1
+select E'{"ab":1}\f{"ab":2}' as bad_json \gset
+\o :copy_json_rt
+\qecho :bad_json
+\o
+copy copyjson_names from :'copy_json_rt' (format json);
+ERROR:  COPY JSON, line 1: invalid input format
+DETAIL:  Expected "{" to start the next row object.
+CONTEXT:  COPY copyjson_names, line 1
+select E'[{"ab":1}]\v' as bad_json \gset
+\o :copy_json_rt
+\qecho :bad_json
+\o
+copy copyjson_names from :'copy_json_rt' (format json);
+ERROR:  invalid input format for COPY JSON
+DETAIL:  Trailing data after JSON array.
+CONTEXT:  COPY copyjson_names, line 1
+select E'[{"ab":1}\f]' as bad_json \gset
+\o :copy_json_rt
+\qecho :bad_json
+\o
+copy copyjson_names from :'copy_json_rt' (format json);
+ERROR:  COPY JSON, line 1: each array element must be a JSON object
+CONTEXT:  COPY copyjson_names, line 1
 -- column list with json format
 copy copytest (style, test, filler) to stdout (format json);
 {"style":"DOS","test":"abc\r\ndef","filler":1}

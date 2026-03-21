@@ -11,3 +11,86 @@ NOTICE:  COPY TO callback has processed 3 rows
  
 (1 row)
 
+CREATE TABLE public.test_json (a text);
+-- Delimiters, nesting and string escapes can span callback reads.
+SELECT test_copy_from_json_callback('test_json',
+    '[{"a":"brace } and quote \"","ignored":[{},[]]},{"a":"backslash \\"}]', 1);
+ test_copy_from_json_callback 
+------------------------------
+                            2
+(1 row)
+
+SELECT * FROM test_json;
+          a          
+---------------------
+ brace } and quote "
+ backslash \
+(2 rows)
+
+TRUNCATE test_json;
+-- Many rows share a buffer, with a partial row at the next refill.
+SELECT test_copy_from_json_callback('test_json', repeat('{"a":"x"}', 8192), 65536);
+ test_copy_from_json_callback 
+------------------------------
+                         8192
+(1 row)
+
+SELECT count(*), bool_and(a = 'x') FROM test_json;
+ count | bool_and 
+-------+----------
+  8192 | t
+(1 row)
+
+TRUNCATE test_json;
+-- Consecutive objects span multiple buffers; consumed rows must be discarded.
+SELECT test_copy_from_json_callback('test_json',
+    repeat('{"a":"' || repeat('x', 70000) || '"}', 4), 65536);
+ test_copy_from_json_callback 
+------------------------------
+                            4
+(1 row)
+
+SELECT count(*), bool_and(a = repeat('x', 70000)) FROM test_json;
+ count | bool_and 
+-------+----------
+     4 | t
+(1 row)
+
+TRUNCATE test_json;
+-- Commas between concatenated objects are rejected identically for all chunks.
+SELECT test_copy_from_json_callback('test_json', '{"a":1},{"a":2}', 14);
+ERROR:  COPY JSON, line 1: invalid input format
+DETAIL:  Cannot use a comma between concatenated JSON objects; use a JSON array.
+CONTEXT:  COPY test_json, line 1
+SELECT test_copy_from_json_callback('test_json', '{"a":1},{"a":2}', 7);
+ERROR:  COPY JSON, line 1: invalid input format
+DETAIL:  Cannot use a comma between concatenated JSON objects; use a JSON array.
+CONTEXT:  COPY test_json, line 1
+SELECT count(*) FROM test_json;
+ count 
+-------
+     0
+(1 row)
+
+-- Cancellation must be checked before refilling, even without a complete row.
+SELECT test_copy_from_json_callback('test_json', repeat(' ', 131072), 65536, true);
+ERROR:  canceling statement due to user request
+CONTEXT:  COPY test_json, line 0
+SELECT test_copy_from_json_callback('test_json', '[]' || repeat(' ', 131072), 65536, true);
+ERROR:  canceling statement due to user request
+CONTEXT:  COPY test_json, line 0
+SELECT test_copy_from_json_callback('test_json', '{"a":"' || repeat('x', 131072), 65536, true);
+ERROR:  canceling statement due to user request
+CONTEXT:  COPY test_json, line 1
+SELECT test_copy_from_json_callback('test_json', '{"a":"ok"}', 1);
+ test_copy_from_json_callback 
+------------------------------
+                            1
+(1 row)
+
+SELECT * FROM test_json;
+ a  
+----
+ ok
+(1 row)
+
