@@ -2680,3 +2680,71 @@ INSERT INTO fp_pk_dup VALUES (1);
 CREATE TABLE fp_fk_dup (a int REFERENCES fp_pk_dup);
 INSERT INTO fp_fk_dup SELECT 1 FROM generate_series(1, 100);
 DROP TABLE fp_fk_dup, fp_pk_dup;
+
+-- Fast-path flush re-entry into the same FK must not corrupt the batch.
+CREATE TABLE fp_re_pk (id int PRIMARY KEY);
+INSERT INTO fp_re_pk SELECT generate_series(1, 2000);
+CREATE TYPE fp_re_vch AS (v int);
+CREATE TABLE fp_re_child (a fp_re_vch);
+CREATE FUNCTION fp_re_cast(fp_re_vch) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+  IF $1.v = 64 THEN
+    INSERT INTO fp_re_child
+      SELECT row(g)::fp_re_vch FROM generate_series(1001, 1064) g;
+  END IF;
+  RETURN $1.v;
+END $$;
+CREATE CAST (fp_re_vch AS int) WITH FUNCTION fp_re_cast(fp_re_vch) AS IMPLICIT;
+ALTER TABLE fp_re_child ADD FOREIGN KEY (a) REFERENCES fp_re_pk(id);
+INSERT INTO fp_re_child SELECT row(g)::fp_re_vch FROM generate_series(1, 64) g;
+SELECT count(*), min((a).v), max((a).v) FROM fp_re_child;
+DROP TABLE fp_re_child, fp_re_pk;
+DROP CAST (fp_re_vch AS int);
+DROP FUNCTION fp_re_cast(fp_re_vch);
+DROP TYPE fp_re_vch;
+
+-- Subtransaction abort during AFTER trigger firing must not drop parent rows.
+CREATE TABLE fp_sub_pk (id int PRIMARY KEY);
+CREATE TABLE fp_sub_fk (a int REFERENCES fp_sub_pk, tag text);
+INSERT INTO fp_sub_pk SELECT generate_series(1, 10);
+CREATE FUNCTION fp_sub_abort() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.tag = 'boom' THEN
+    BEGIN
+      PERFORM 1 / 0;
+    EXCEPTION WHEN others THEN
+      NULL;
+    END;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER zzz_fp_sub_abort AFTER INSERT ON fp_sub_fk
+  FOR EACH ROW EXECUTE FUNCTION fp_sub_abort();
+INSERT INTO fp_sub_fk VALUES
+  (999, 'bad'), (0, 'boom'), (1, 'ok'), (2, 'ok'), (3, 'ok');
+SELECT count(*) FROM fp_sub_fk;
+DROP TABLE fp_sub_fk, fp_sub_pk;
+DROP FUNCTION fp_sub_abort();
+
+-- Fast-path flush re-entry into a different FK must not miss the new check.
+CREATE TABLE fp_cross_re_pk (id int PRIMARY KEY);
+INSERT INTO fp_cross_re_pk SELECT generate_series(1, 64);
+CREATE TABLE fp_cross_re_child2 (a int REFERENCES fp_cross_re_pk);
+CREATE TYPE fp_cross_re_vch AS (v int);
+CREATE TABLE fp_cross_re_child (a fp_cross_re_vch);
+CREATE FUNCTION fp_cross_re_cast(fp_cross_re_vch) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+  IF $1.v = 1 THEN
+    INSERT INTO fp_cross_re_child2 VALUES (999999);
+  END IF;
+  RETURN $1.v;
+END $$;
+CREATE CAST (fp_cross_re_vch AS int)
+  WITH FUNCTION fp_cross_re_cast(fp_cross_re_vch) AS IMPLICIT;
+ALTER TABLE fp_cross_re_child ADD FOREIGN KEY (a) REFERENCES fp_cross_re_pk(id);
+INSERT INTO fp_cross_re_child VALUES (row(1)::fp_cross_re_vch);
+SELECT count(*) FROM fp_cross_re_child2;
+DROP TABLE fp_cross_re_child, fp_cross_re_child2, fp_cross_re_pk;
+DROP CAST (fp_cross_re_vch AS int);
+DROP FUNCTION fp_cross_re_cast(fp_cross_re_vch);
+DROP TYPE fp_cross_re_vch;

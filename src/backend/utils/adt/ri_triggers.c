@@ -227,9 +227,10 @@ typedef struct RI_CompareHashEntry
  * RI_FastPathEntry is not subject to cache invalidation.  The cached
  * relations are held open with locks for the transaction duration, preventing
  * relcache invalidation.  The entry itself is torn down at batch end by
- * ri_FastPathEndBatch(); on abort, ResourceOwner releases the cached
- * relations and the XactCallback/SubXactCallback NULL the static cache pointer
- * to prevent any subsequent access.
+ * ri_FastPathEndBatch(); on top-level abort, ResourceOwner releases the
+ * cached relations and the XactCallback NULLs the static cache pointer to
+ * prevent any subsequent access.  Subtransaction abort keeps parent rows and
+ * removes only rows buffered by the aborting subtransaction.
  */
 typedef struct RI_FastPathEntry
 {
@@ -240,6 +241,7 @@ typedef struct RI_FastPathEntry
 	TupleTableSlot *pk_slot;
 	TupleTableSlot *fk_slot;
 	MemoryContext flush_cxt;	/* short-lived context for per-flush work */
+	SubTransactionId create_subid;
 
 	/*
 	 * TODO: batch[] is HeapTuple[] because the AFTER trigger machinery
@@ -248,6 +250,7 @@ typedef struct RI_FastPathEntry
 	 * storage abstraction exists at that point to be TAM-agnostic.
 	 */
 	HeapTuple	batch[RI_FASTPATH_BATCH_SIZE];
+	SubTransactionId batch_subids[RI_FASTPATH_BATCH_SIZE];
 	int			batch_count;
 } RI_FastPathEntry;
 
@@ -261,6 +264,7 @@ static dclist_head ri_constraint_cache_valid_list;
 
 static HTAB *ri_fastpath_cache = NULL;
 static bool ri_fastpath_callback_registered = false;
+static int	ri_fastpath_flush_depth = 0;
 
 /*
  * Local function prototypes
@@ -346,6 +350,7 @@ pg_noreturn static void ri_ReportViolation(const RI_ConstraintInfo *riinfo,
 static RI_FastPathEntry *ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo,
 											 Relation fk_rel);
 static void ri_FastPathEndBatch(void *arg);
+static void ri_FastPathCloseEntry(RI_FastPathEntry *entry);
 static void ri_FastPathTeardown(void);
 
 
@@ -463,14 +468,14 @@ RI_FKey_check(TriggerData *trigdata)
 	 */
 	if (ri_fastpath_is_applicable(riinfo))
 	{
-		if (AfterTriggerIsActive())
+		if (AfterTriggerIsActive() && ri_fastpath_flush_depth == 0)
 		{
 			/* Batched path: buffer and probe in groups */
 			ri_FastPathBatchAdd(riinfo, fk_rel, newslot);
 		}
 		else
 		{
-			/* ALTER TABLE validation: per-row, no cache */
+			/* ALTER TABLE validation or re-entrant flush: per-row, no cache */
 			ri_FastPathCheck(riinfo, fk_rel, newslot);
 		}
 		return PointerGetDatum(NULL);
@@ -2862,9 +2867,14 @@ ri_FastPathBatchAdd(RI_ConstraintInfo *riinfo,
 	RI_FastPathEntry *fpentry = ri_FastPathGetEntry(riinfo, fk_rel);
 	MemoryContext oldcxt;
 
+	if (fpentry->batch_count >= RI_FASTPATH_BATCH_SIZE)
+		ri_FastPathBatchFlush(fpentry, fk_rel, riinfo);
+
 	oldcxt = MemoryContextSwitchTo(fpentry->flush_cxt);
 	fpentry->batch[fpentry->batch_count] =
 		ExecCopySlotHeapTuple(newslot);
+	fpentry->batch_subids[fpentry->batch_count] =
+		GetCurrentSubTransactionId();
 	fpentry->batch_count++;
 	MemoryContextSwitchTo(oldcxt);
 
@@ -2944,13 +2954,24 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel,
 	}
 	Assert(riinfo->fpmeta);
 
-	/* Skip array overhead for single-row batches. */
-	if (riinfo->nkeys == 1 && fpentry->batch_count > 1)
-		violation_index = ri_FastPathFlushArray(fpentry, fk_slot, riinfo,
-												fk_rel, snapshot, scandesc);
-	else
-		violation_index = ri_FastPathFlushLoop(fpentry, fk_slot, riinfo,
-											   fk_rel, snapshot, scandesc);
+	ri_fastpath_flush_depth++;
+	PG_TRY();
+	{
+		/* Skip array overhead for single-row batches. */
+		if (riinfo->nkeys == 1 && fpentry->batch_count > 1)
+			violation_index = ri_FastPathFlushArray(fpentry, fk_slot, riinfo,
+													fk_rel, snapshot, scandesc);
+		else
+			violation_index = ri_FastPathFlushLoop(fpentry, fk_slot, riinfo,
+												   fk_rel, snapshot, scandesc);
+	}
+	PG_CATCH();
+	{
+		ri_fastpath_flush_depth--;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	ri_fastpath_flush_depth--;
 
 	SetUserIdAndSecContext(saved_userid, saved_sec_context);
 	UnregisterSnapshot(snapshot);
@@ -4132,25 +4153,33 @@ RI_FKey_trigger_type(Oid tgfoid)
 static void
 ri_FastPathEndBatch(void *arg)
 {
-	HASH_SEQ_STATUS status;
-	RI_FastPathEntry *entry;
+	bool		flushed;
 
 	if (ri_fastpath_cache == NULL)
 		return;
 
 	/* Flush any partial batches -- can throw ERROR */
-	hash_seq_init(&status, ri_fastpath_cache);
-	while ((entry = hash_seq_search(&status)) != NULL)
+	do
 	{
-		if (entry->batch_count > 0)
-		{
-			Relation	fk_rel = table_open(entry->fk_relid, AccessShareLock);
-			RI_ConstraintInfo *riinfo = ri_LoadConstraintInfo(entry->conoid);
+		HASH_SEQ_STATUS status;
+		RI_FastPathEntry *entry;
 
-			ri_FastPathBatchFlush(entry, fk_rel, riinfo);
-			table_close(fk_rel, NoLock);
+		flushed = false;
+		hash_seq_init(&status, ri_fastpath_cache);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			if (entry->batch_count > 0)
+			{
+				Relation	fk_rel = table_open(entry->fk_relid, AccessShareLock);
+				RI_ConstraintInfo *riinfo = ri_LoadConstraintInfo(entry->conoid);
+
+				ri_FastPathBatchFlush(entry, fk_rel, riinfo);
+				table_close(fk_rel, NoLock);
+				flushed = true;
+			}
 		}
 	}
+	while (flushed);
 
 	ri_FastPathTeardown();
 }
@@ -4172,22 +4201,26 @@ ri_FastPathTeardown(void)
 
 	hash_seq_init(&status, ri_fastpath_cache);
 	while ((entry = hash_seq_search(&status)) != NULL)
-	{
-		if (entry->idx_rel)
-			index_close(entry->idx_rel, NoLock);
-		if (entry->pk_rel)
-			table_close(entry->pk_rel, NoLock);
-		if (entry->pk_slot)
-			ExecDropSingleTupleTableSlot(entry->pk_slot);
-		if (entry->fk_slot)
-			ExecDropSingleTupleTableSlot(entry->fk_slot);
-		if (entry->flush_cxt)
-			MemoryContextDelete(entry->flush_cxt);
-	}
+		ri_FastPathCloseEntry(entry);
 
 	hash_destroy(ri_fastpath_cache);
 	ri_fastpath_cache = NULL;
 	ri_fastpath_callback_registered = false;
+}
+
+static void
+ri_FastPathCloseEntry(RI_FastPathEntry *entry)
+{
+	if (entry->idx_rel)
+		index_close(entry->idx_rel, NoLock);
+	if (entry->pk_rel)
+		table_close(entry->pk_rel, NoLock);
+	if (entry->pk_slot)
+		ExecDropSingleTupleTableSlot(entry->pk_slot);
+	if (entry->fk_slot)
+		ExecDropSingleTupleTableSlot(entry->fk_slot);
+	if (entry->flush_cxt)
+		MemoryContextDelete(entry->flush_cxt);
 }
 
 static bool ri_fastpath_xact_callback_registered = false;
@@ -4202,21 +4235,67 @@ ri_FastPathXactCallback(XactEvent event, void *arg)
 	 */
 	ri_fastpath_cache = NULL;
 	ri_fastpath_callback_registered = false;
+	ri_fastpath_flush_depth = 0;
 }
 
 static void
 ri_FastPathSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 						   SubTransactionId parentSubid, void *arg)
 {
-	if (event == SUBXACT_EVENT_ABORT_SUB)
+	HASH_SEQ_STATUS status;
+	RI_FastPathEntry *entry;
+
+	if (ri_fastpath_cache == NULL)
+		return;
+
+	if (event == SUBXACT_EVENT_COMMIT_SUB)
 	{
-		/*
-		 * ResourceOwner already released relations.  NULL the static pointers
-		 * so the still-registered batch callback becomes a no-op for the rest
-		 * of this transaction.
-		 */
-		ri_fastpath_cache = NULL;
-		ri_fastpath_callback_registered = false;
+		hash_seq_init(&status, ri_fastpath_cache);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			if (entry->create_subid == mySubid)
+				entry->create_subid = parentSubid;
+
+			for (int i = 0; i < entry->batch_count; i++)
+				if (entry->batch_subids[i] == mySubid)
+					entry->batch_subids[i] = parentSubid;
+		}
+	}
+	else if (event == SUBXACT_EVENT_ABORT_SUB)
+	{
+		hash_seq_init(&status, ri_fastpath_cache);
+		while ((entry = hash_seq_search(&status)) != NULL)
+		{
+			if (entry->create_subid == mySubid)
+			{
+				Oid			conoid = entry->conoid;
+
+				ri_FastPathCloseEntry(entry);
+				(void) hash_search(ri_fastpath_cache, &conoid,
+								   HASH_REMOVE, NULL);
+				continue;
+			}
+
+			for (int i = 0; i < entry->batch_count;)
+			{
+				if (entry->batch_subids[i] == mySubid)
+				{
+					heap_freetuple(entry->batch[i]);
+					entry->batch_count--;
+					if (i < entry->batch_count)
+					{
+						entry->batch[i] = entry->batch[entry->batch_count];
+						entry->batch_subids[i] =
+							entry->batch_subids[entry->batch_count];
+					}
+					entry->batch[entry->batch_count] = NULL;
+					entry->batch_subids[entry->batch_count] =
+						InvalidSubTransactionId;
+				}
+				else
+					i++;
+			}
+		}
 	}
 }
 
@@ -4274,6 +4353,7 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
 		oldcxt = MemoryContextSwitchTo(TopTransactionContext);
 
 		entry->fk_relid = RelationGetRelid(fk_rel);
+		entry->create_subid = GetCurrentSubTransactionId();
 
 		/*
 		 * Open PK table and its unique index.
