@@ -1,0 +1,41 @@
+DROP TABLE
+psql:/Users/xuebit/zhjw/postgres/contrib/arrow_decimal/benchmark/int128_setup.sql:4: NOTICE:  drop cascades to 12 other objects
+DETAIL:  drop cascades to function benchmark_decimal128_add_portable(decimal128,decimal128)
+drop cascades to function benchmark_decimal128_mul_portable(decimal128,decimal128)
+drop cascades to function benchmark_decimal128_cmp_portable(decimal128,decimal128)
+drop cascades to function benchmark_decimal128_sum_trans_portable(internal,decimal128)
+drop cascades to function benchmark_decimal128_sum_final_portable(internal)
+drop cascades to function benchmark_sum_portable(decimal128)
+drop cascades to function benchmark_decimal128_add_int128(decimal128,decimal128)
+drop cascades to function benchmark_decimal128_mul_int128(decimal128,decimal128)
+drop cascades to function benchmark_decimal128_cmp_int128(decimal128,decimal128)
+drop cascades to function benchmark_decimal128_sum_trans_int128(internal,decimal128)
+drop cascades to function benchmark_decimal128_sum_final_int128(internal)
+drop cascades to function benchmark_sum_int128(decimal128)
+DROP EXTENSION
+CREATE EXTENSION
+CREATE TABLE
+INSERT 0 1000000
+VACUUM
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE AGGREGATE
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE AGGREGATE
+ row_count 
+-----------
+   1000000
+(1 row)
+
+ sum_matches | add_matches | rescale_matches | multiply_matches 
+-------------+-------------+-----------------+------------------
+ t           | t           | t               | t
+(1 row)
+

@@ -13,6 +13,7 @@ contrib_doc_args = {
 }
 
 subdir('amcheck')
+subdir('arrow_decimal')
 subdir('auth_delay')
 subdir('auto_explain')
 subdir('basic_archive')

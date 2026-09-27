@@ -1,0 +1,6 @@
+workload,portable_median_tps,int128_median_tps,int128_over_portable
+compare,20.675671,20.996442,1.0155
+sum,27.108152,28.850612,1.0643
+add,17.538236,19.399385,1.1061
+add_rescale,7.172243,14.832042,2.0680
+multiply,14.686250,17.819542,1.2133

@@ -1,0 +1,6 @@
+# arrow_decimal extension
+comment = 'fixed-precision decimal types with Arrow-compatible value codecs'
+default_version = '1.0'
+module_pathname = '$libdir/arrow_decimal'
+relocatable = true
+trusted = true

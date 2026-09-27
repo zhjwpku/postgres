@@ -1,0 +1,11 @@
+implementation,workload,n,mean_tps,median_tps,cv_percent
+portable,compare,5,20.775129,20.675671,1.038
+int128,compare,5,21.032494,20.996442,0.911
+portable,sum,5,27.172925,27.108152,1.331
+int128,sum,5,28.882298,28.850612,1.006
+portable,add,5,17.616401,17.538236,0.637
+int128,add,5,19.329104,19.399385,1.208
+portable,add_rescale,5,7.182123,7.172243,0.659
+int128,add_rescale,5,14.693668,14.832042,1.588
+portable,multiply,5,14.743213,14.686250,1.012
+int128,multiply,5,17.795440,17.819542,0.281

@@ -1,0 +1,13 @@
+case_name,family,width,workload,n,mean_tps,median_tps,cv_percent
+numeric64_filter,numeric,64,filter,5,20.545370,20.548233,0.696
+decimal64_filter,fixed,64,filter,5,46.288345,46.223568,0.340
+numeric128_filter,numeric,128,filter,5,20.618838,20.653373,0.776
+decimal128_filter,fixed,128,filter,5,43.199522,43.455487,1.050
+numeric64_add,numeric,64,add,5,20.589776,20.620548,0.349
+decimal64_add,fixed,64,add,5,32.718408,32.860114,0.839
+numeric128_add,numeric,128,add,5,20.758447,20.850033,0.618
+decimal128_add,fixed,128,add,5,31.571246,31.867506,1.242
+numeric64_multiply,numeric,64,multiply,5,20.910911,20.919960,0.210
+decimal64_multiply,fixed,64,multiply,5,33.968973,34.101511,0.861
+numeric128_multiply,numeric,128,multiply,5,20.382823,20.395871,0.241
+decimal128_multiply,fixed,128,multiply,5,27.847246,28.089247,1.542
